@@ -122,6 +122,42 @@ def test_job_create_is_idempotent(tmp_path: Path):
     assert Job.open(tmp_path / "jobs", "abc").root == job.root
 
 
+@pytest.mark.parametrize("fail", [("symlink_to",), ("symlink_to", "link")])
+def test_job_create_falls_back_without_symlinks(tmp_path: Path, monkeypatch, fail):
+    """Windows without Developer Mode: symlink fails → hardlink; cross-volume → copy."""
+
+    def denied(*args, **kwargs):
+        raise OSError("WinError 1314: A required privilege is not held by the client")
+
+    if "symlink_to" in fail:
+        monkeypatch.setattr(Path, "symlink_to", denied)
+    if "link" in fail:
+        monkeypatch.setattr("echo.job.os.link", denied)
+    video = tmp_path / "ep.mp4"
+    video.write_bytes(b"fake")
+    job = Job.create(tmp_path / "jobs", video)
+    assert not job.input_video.is_symlink()
+    assert job.input_video.read_bytes() == b"fake"
+
+
+def test_job_create_rejects_different_video(tmp_path: Path):
+    first, second = tmp_path / "a.mp4", tmp_path / "b.mp4"
+    first.write_bytes(b"a")
+    second.write_bytes(b"b")
+    Job.create(tmp_path / "jobs", first, job_id="abc")
+    with pytest.raises(InvalidInputError, match="was created for"):
+        Job.create(tmp_path / "jobs", second, job_id="abc")
+
+
+def test_job_create_with_moved_source(tmp_path: Path):
+    video = tmp_path / "ep.mp4"
+    video.write_bytes(b"fake")
+    Job.create(tmp_path / "jobs", video, job_id="abc")
+    moved = video.rename(tmp_path / "moved.mp4")  # input.mp4 is now a broken symlink
+    with pytest.raises(InvalidInputError):
+        Job.create(tmp_path / "jobs", moved, job_id="abc")
+
+
 def test_job_create_rejects_missing_video(tmp_path: Path):
     with pytest.raises(InvalidInputError):
         Job.create(tmp_path, tmp_path / "missing.mp4")

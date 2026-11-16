@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import tempfile
 import unicodedata
 import uuid
@@ -50,6 +51,21 @@ def _atomic_write(path: Path, data: bytes) -> None:
         raise
 
 
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """Symlink, falling back to a hardlink, then a copy.
+
+    Windows needs admin or Developer Mode for symlinks, and hardlinks only work
+    on the same volume.
+    """
+    try:
+        dst.symlink_to(src)
+    except OSError:
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
+
+
 class Job:
     """Typed access to one job directory. Stages use these paths and read/write methods only."""
 
@@ -60,20 +76,25 @@ class Job:
 
     @classmethod
     def create(cls, jobs_dir: Path, video: Path, job_id: str | None = None) -> Job:
-        """Create (or reopen) a job for ``video``. Idempotent for an existing job_id."""
+        """Create (or reopen) a job for ``video``. Idempotent for an existing job_id.
+
+        Raises InvalidInputError if the video is missing, or if ``job_id`` already
+        belongs to a different video.
+        """
         if not video.is_file():
             raise InvalidInputError(f"input video not found: {video}")
+        source = video.resolve()
         job = cls(jobs_dir / (job_id or uuid.uuid4().hex[:12]))
+        if job.meta_path.exists() and job.read_meta().source != str(source):
+            raise InvalidInputError(
+                f"job {job.job_id!r} was created for {job.read_meta().source}, not {source}"
+            )
         job.root.mkdir(parents=True, exist_ok=True)
-        if not job.input_video.exists():
-            job.input_video.symlink_to(video.resolve())
+        if not (job.input_video.is_symlink() or job.input_video.exists()):
+            _link_or_copy(source, job.input_video)
         if not job.meta_path.exists():
             job.write_meta(
-                JobMeta(
-                    job_id=job.root.name,
-                    source=str(video.resolve()),
-                    created_at=datetime.now(UTC),
-                )
+                JobMeta(job_id=job.job_id, source=str(source), created_at=datetime.now(UTC))
             )
         return job
 

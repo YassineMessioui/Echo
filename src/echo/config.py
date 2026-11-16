@@ -37,7 +37,7 @@ class LLMConfig(_Section):
 
 class RefineConfig(_Section):
     min_duration: float = Field(default=15.0, gt=0)
-    max_duration: float = Field(default=90.0, gt=0)
+    max_duration: float = Field(default=60.0, gt=0)
     padding: float = Field(default=0.2, ge=0)
 
     @model_validator(mode="after")
