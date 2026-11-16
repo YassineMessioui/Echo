@@ -172,6 +172,8 @@ def _first_frame(video: Path, out: Path, vf: str | None) -> bytes:
 @pytest.mark.ffmpeg
 def test_captions_are_burned_in(make_video, tmp_path: Path):
     """Real ffmpeg + libass, with a path that needs every kind of escaping."""
+    if not ffmpeg.has_filter("subtitles"):
+        pytest.skip("this ffmpeg has no libass ('subtitles' filter)")
     video = make_video(duration=1.0, size="270x480")
     transcript = _transcript([(0.0, 0.8, "Caption"), (0.8, 1.0, "test")], duration=1.0)
     ass = tmp_path / "it's a [test], ok" / "01-clip.ass"

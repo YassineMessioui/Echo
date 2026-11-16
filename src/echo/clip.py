@@ -31,8 +31,8 @@ from typing import ClassVar
 
 from echo.captions import CaptionStyle, build_ass, chain_filters, subtitles_filter
 from echo.config import ClipConfig, PipelineConfig
-from echo.errors import ArtifactError, InvalidInputError
-from echo.ffmpeg import ffmpeg
+from echo.errors import ArtifactError, ExternalToolError, InvalidInputError
+from echo.ffmpeg import ffmpeg, has_filter
 from echo.interfaces import Clipper
 from echo.job import Job, _atomic_write
 from echo.models import ClipSpec, StageName
@@ -102,6 +102,12 @@ def cut_clips(
         raise ValueError(f"got {len(clips)} clips but {len(outputs)} output paths")
     if not video.is_file():
         raise InvalidInputError(f"input video not found: {video}")
+    if extra_filter and "subtitles=" in extra_filter and not has_filter("subtitles"):
+        raise ExternalToolError(
+            "this ffmpeg has no 'subtitles' filter (it was built without libass), so captions "
+            "can't be burned in. Install an ffmpeg build with libass, or turn captions off "
+            "(caption.enabled = false)."
+        )
     if video_filter is None and clips:
         video_filter = video_filter_for(video, config)
     video_filter = chain_filters(video_filter, extra_filter)
@@ -200,14 +206,22 @@ class ClipStage:
                 ass_path.unlink(missing_ok=True)
                 self.clipper(job.input_video, [clip], [path], config.clip)
             else:
-                _atomic_write(ass_path, ass.encode("utf-8-sig"))  # BOM: libass reads it anywhere
-                self.clipper(
-                    job.input_video,
-                    [clip],
-                    [path],
-                    config.clip,
-                    extra_filter=subtitles_filter(ass_path),
-                )
+                # Burn from a temp file and move it into place only once the clip is cut,
+                # so a failed encode never leaves a .ass that doesn't match its .mp4.
+                tmp = ass_path.with_name(f".{ass_path.name}.tmp")
+                tmp.write_bytes(ass.encode("utf-8-sig"))  # BOM: libass reads it anywhere
+                try:
+                    self.clipper(
+                        job.input_video,
+                        [clip],
+                        [path],
+                        config.clip,
+                        extra_filter=subtitles_filter(tmp),
+                    )
+                    os.replace(tmp, ass_path)
+                except BaseException:
+                    tmp.unlink(missing_ok=True)
+                    raise
             manifest[path.name] = entry
             _write_manifest(job, manifest)  # after every clip, so a crash loses at most one
 

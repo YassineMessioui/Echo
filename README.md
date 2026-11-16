@@ -116,7 +116,7 @@ Every platform needs its own developer app and OAuth credentials. Check each one
 
 ## Getting started
 
-Requirements: [uv](https://docs.astral.sh/uv/getting-started/installation/) and `ffmpeg` on your PATH.
+Requirements: [uv](https://docs.astral.sh/uv/getting-started/installation/) and `ffmpeg` on your PATH, built **with libass** for burned-in captions (Ubuntu/Debian `apt install ffmpeg` and Windows `choco install ffmpeg` include it; Homebrew's default `ffmpeg` on macOS does not, so use a build with libass or set `caption.enabled = false`).
 
 ```bash
 git clone https://github.com/YassineMessioui/Echo.git && cd Echo

@@ -391,9 +391,9 @@ def test_extra_filter_is_chained_after_reframing(monkeypatch, tmp_path):
     monkeypatch.setattr(clip_module, "ffmpeg", lambda args: seen.append(args))
     monkeypatch.setattr(clip_module.os, "replace", lambda a, b: None)
     clip = ClipSpec.between("t", 0, 20)
-    cut_clips(video, [clip], [tmp_path / "o.mp4"], ClipConfig(), extra_filter="subtitles=x")
+    cut_clips(video, [clip], [tmp_path / "o.mp4"], ClipConfig(), extra_filter="eq=gamma=1.1")
     args = seen[0]
-    assert args[args.index("-vf") + 1] == "crop=1:1,scale=1080:1920,subtitles=x"
+    assert args[args.index("-vf") + 1] == "crop=1:1,scale=1080:1920,eq=gamma=1.1"
 
 
 def test_extra_filter_without_reframing(monkeypatch, tmp_path):
@@ -428,7 +428,9 @@ def test_captions_are_written_and_burned_in(job_copy):
         ass = captions_path(path)
         assert ass.read_bytes().startswith(b"\xef\xbb\xbf")
         assert "Dialogue:" in ass.read_text(encoding="utf-8-sig")
-        assert extra == subtitles_filter(ass)
+        # Burned from a temp copy that was then moved into place.
+        assert extra == subtitles_filter(ass.with_name(f".{ass.name}.tmp"))
+    assert _leftovers(job.clips_dir) == []
 
 
 def test_captions_disabled(job_copy):
@@ -487,6 +489,8 @@ def test_deleted_clips_take_their_captions_with_them(job_copy):
 @pytest.mark.ffmpeg
 def test_stage_burns_captions_into_vertical_clips(make_video, tmp_path):
     """Real ffmpeg: reframe + captions in one encode, 1080x1920 out, captions visible."""
+    if not ffmpeg_module.has_filter("subtitles"):
+        pytest.skip("this ffmpeg has no libass ('subtitles' filter)")
     from echo.models import Segment, Transcript, Word
 
     video = make_video(duration=3.0, size="320x180")
@@ -530,3 +534,25 @@ def test_stage_burns_captions_into_vertical_clips(make_video, tmp_path):
     with_captions = run("with", PipelineConfig())
     without = run("without", _caption_config(enabled=False))
     assert with_captions != without
+
+
+def test_failed_encode_leaves_no_caption_file(job_copy):
+    job = _job_with_video(job_copy)
+    with pytest.raises(ExternalToolError):
+        ClipStage(clipper=RecordingClipper(fail_on=0)).run(job, PipelineConfig())
+    assert not captions_path(_paths(job)[0]).exists()
+    assert _leftovers(job.clips_dir) == []
+
+
+def test_ffmpeg_without_libass_gives_a_clear_error(monkeypatch, tmp_path):
+    video = tmp_path / "in.mp4"
+    video.write_bytes(b"x")
+    monkeypatch.setattr(clip_module, "has_filter", lambda name: False)
+    with pytest.raises(ExternalToolError, match=r"without libass.*caption\.enabled = false"):
+        cut_clips(
+            video,
+            [ClipSpec.between("t", 0, 20)],
+            [tmp_path / "o.mp4"],
+            ClipConfig(aspect="source"),
+            extra_filter="subtitles=filename=a.ass",
+        )
