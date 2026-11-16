@@ -106,7 +106,7 @@ def cut_clips(
         raise ExternalToolError(
             "this ffmpeg has no 'subtitles' filter (it was built without libass), so captions "
             "can't be burned in. Install an ffmpeg build with libass, or turn captions off "
-            "(caption.enabled = false)."
+            "(--no-captions, or caption.enabled = false)."
         )
     if video_filter is None and clips:
         video_filter = video_filter_for(video, config)
@@ -190,7 +190,7 @@ class ClipStage:
         if burn and not job.transcript_path.is_file():
             raise ArtifactError(
                 f"captions need {job.transcript_path}; run the transcribe stage first, or "
-                "turn captions off (caption.enabled = false)"
+                "turn captions off (--no-captions, or caption.enabled = false)"
             )
         transcript = job.read_transcript() if burn else None
         style = CaptionStyle.from_config(config.caption)

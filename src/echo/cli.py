@@ -27,7 +27,8 @@ from echo.config import (
     RefineConfig,
     TranscribeConfig,
 )
-from echo.errors import EchoError
+from echo.errors import EchoError, ExternalToolError
+from echo.ffmpeg import has_filter
 from echo.job import Job
 from echo.models import StageName, StageStatus
 from echo.pipeline import StageEvent, build_stages, run_pipeline
@@ -84,6 +85,24 @@ def _main(
     # API keys (GROQ_API_KEY, MISTRAL_API_KEY, ...) can live in a git-ignored .env, found
     # from the current directory upwards. Variables already set in the shell win.
     load_dotenv(find_dotenv(usecwd=True), override=False)
+
+
+def _check_captions_supported(config: PipelineConfig) -> None:
+    """With captions on, check for libass now rather than after transcription and the
+    LLM have run. If ffmpeg itself is missing, the ingest stage reports that."""
+    if not config.caption.enabled:
+        return
+    try:
+        supported = has_filter("subtitles")
+    except ExternalToolError:
+        return
+    if not supported:
+        typer.echo(
+            "error: this ffmpeg has no 'subtitles' filter (built without libass), so captions "
+            "can't be burned in. Install an ffmpeg build with libass, or run with --no-captions.",
+            err=True,
+        )
+        raise typer.Exit(1)
 
 
 def _build_config(
@@ -196,6 +215,7 @@ def run(
         clip={"aspect": aspect.value, "crop_x": crop_x, "background": background.value},
         caption={"enabled": captions},
     )
+    _check_captions_supported(config)
 
     def on_event(event: StageEvent) -> None:
         if event.status is not StageStatus.RUNNING:

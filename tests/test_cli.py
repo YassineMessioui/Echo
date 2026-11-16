@@ -321,3 +321,20 @@ def test_dotenv_is_loaded_without_overriding_the_shell(fake, video, jobs_dir, mo
     finally:
         os.environ.pop("MISTRAL_API_KEY", None)  # load_dotenv sets it outside monkeypatch
     assert seen == {"mistral": "from-dotenv", "groq": "from-shell"}
+
+
+def test_missing_libass_fails_before_running_any_stage(fake, video, jobs_dir, monkeypatch):
+    monkeypatch.setattr(cli, "has_filter", lambda name: False)
+    result = run(video, jobs_dir)
+    assert result.exit_code == 1
+    assert "--no-captions" in result.stderr
+    assert fake.calls == [], "the pipeline never started"
+    assert run(video, jobs_dir, "--no-captions").exit_code == 0
+
+
+def test_libass_check_skipped_when_ffmpeg_is_missing(fake, video, jobs_dir, monkeypatch):
+    def no_ffmpeg(name):
+        raise cli.ExternalToolError("ffmpeg not found on PATH")
+
+    monkeypatch.setattr(cli, "has_filter", no_ffmpeg)
+    assert run(video, jobs_dir).exit_code == 0  # left to the ingest stage to report
