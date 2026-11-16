@@ -216,10 +216,10 @@ def test_missing_video_is_a_clean_error(fake, tmp_path, jobs_dir):
 
 
 def test_progress_lines(fake, video, jobs_dir):
+    # As #12 emits them: RUNNING → DONE/FAILED; a skipped stage sends only SKIPPED.
     fake.events = [
         StageEvent(StageName.INGEST, StageStatus.RUNNING),
         StageEvent(StageName.INGEST, StageStatus.DONE, elapsed=2.14),
-        StageEvent(StageName.TRANSCRIBE, StageStatus.RUNNING),
         StageEvent(StageName.TRANSCRIBE, StageStatus.SKIPPED),
         StageEvent(StageName.LLM, StageStatus.RUNNING),
         StageEvent(StageName.LLM, StageStatus.FAILED, elapsed=0.5, error="boom"),
@@ -231,6 +231,13 @@ def test_progress_lines(fake, video, jobs_dir):
         "[2/5] transcribe  skipped",
         "[3/5] llm         failed    0.5s",
     ]
+
+
+def test_failed_without_running_event(fake, video, jobs_dir):
+    """A stage whose ``outputs()`` raises sends FAILED with no RUNNING before it."""
+    fake.events = [StageEvent(StageName.REFINE, StageStatus.FAILED, error="ValueError: x")]
+    result = run(video, jobs_dir)
+    assert result.stdout.splitlines()[0] == "[4/5] refine      failed"
 
 
 def test_lists_job_dir_and_clip_paths(fake, video, jobs_dir):
