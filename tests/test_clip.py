@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from echo import clip as clip_module
-from echo.clip import ClipStage, build_ffmpeg_args, cut_clips
+from echo.clip import MANIFEST, ClipStage, build_ffmpeg_args, clip_paths, cut_clips
 from echo.config import ClipConfig, PipelineConfig
 from echo.errors import ArtifactError, ExternalToolError, InvalidInputError
 from echo.ffmpeg import probe
@@ -17,11 +17,20 @@ class RecordingClipper:
     """Fake ``Clipper``: records calls and writes a placeholder file per output."""
 
     calls: list[tuple[list[ClipSpec], list[Path]]] = field(default_factory=list)
+    fail_on: int | None = None
+    """Raise on this call number (0-based), like an ffmpeg crash mid-run."""
 
     def __call__(self, video, clips, outputs, config) -> None:
+        if self.fail_on == len(self.calls):
+            raise ExternalToolError("boom")
         self.calls.append((clips, outputs))
         for out in outputs:
             out.write_bytes(b"clip")
+
+    @property
+    def cut(self) -> list[tuple[ClipSpec, Path]]:
+        """Every (clip, output) cut, across calls."""
+        return [pair for clips, outs in self.calls for pair in zip(clips, outs, strict=True)]
 
 
 def _job_with_video(job_copy: Job) -> Job:
@@ -167,12 +176,24 @@ def test_stage_name():
     assert ClipStage.name == StageName.CLIP
 
 
-def test_outputs_use_index_and_slug(job_copy):
-    assert [p.name for p in ClipStage().outputs(job_copy)] == [
+def _paths(job: Job) -> list[Path]:
+    return clip_paths(job, job.read_clips())
+
+
+def test_clip_paths_use_index_and_slug(job_copy):
+    assert [p.name for p in _paths(job_copy)] == [
         "01-solar-power-is-now-the-cheapest-electricity.mp4",
         "02-sleep-and-productivity.mp4",
     ]
-    assert all(p.parent == job_copy.clips_dir for p in ClipStage().outputs(job_copy))
+    assert all(p.parent == job_copy.clips_dir for p in _paths(job_copy))
+
+
+def test_outputs_include_a_missing_marker_until_cut(job_copy):
+    job = _job_with_video(job_copy)
+    assert not all(p.exists() for p in ClipStage().outputs(job))
+    ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
+    assert ClipStage().outputs(job) == _paths(job)
+    assert all(p.exists() for p in ClipStage().outputs(job))
 
 
 def test_outputs_before_refine_ran(tmp_path):
@@ -183,29 +204,73 @@ def test_outputs_before_refine_ran(tmp_path):
 
 def test_titles_with_same_slug_get_distinct_files(job_copy):
     job_copy.write_clips([ClipSpec.between("Q&A", 0, 20), ClipSpec.between("Q & A!", 20, 40)])
-    assert [p.name for p in ClipStage().outputs(job_copy)] == ["01-q-a.mp4", "02-q-a.mp4"]
+    assert [p.name for p in _paths(job_copy)] == ["01-q-a.mp4", "02-q-a.mp4"]
 
 
 def test_run_cuts_all_clips(job_copy):
     job = _job_with_video(job_copy)
     clipper = RecordingClipper()
     ClipStage(clipper=clipper).run(job, PipelineConfig())
-    assert len(clipper.calls) == 1
-    clips, outputs = clipper.calls[0]
-    assert clips == job.read_clips()
-    assert outputs == ClipStage().outputs(job)
-    assert all(p.exists() for p in outputs)
+    assert clipper.cut == list(zip(job.read_clips(), _paths(job), strict=True))
+    assert all(p.exists() for p in _paths(job))
 
 
-def test_run_skips_existing_clips(job_copy):
+def test_run_resumes_after_a_crash(job_copy):
     job = _job_with_video(job_copy)
-    first, second = ClipStage().outputs(job)
-    job.clips_dir.mkdir()
-    first.write_bytes(b"already cut")
+    first, second = _paths(job)
+    with pytest.raises(ExternalToolError):
+        ClipStage(clipper=RecordingClipper(fail_on=1)).run(job, PipelineConfig())
+    assert first.exists() and not second.exists()
     clipper = RecordingClipper()
     ClipStage(clipper=clipper).run(job, PipelineConfig())
-    assert clipper.calls == [([job.read_clips()[1]], [second])]
-    assert first.read_bytes() == b"already cut"
+    assert clipper.cut == [(job.read_clips()[1], second)]
+
+
+def test_unrecorded_file_is_recut(job_copy):
+    """A file the manifest doesn't vouch for (e.g. a leftover) isn't trusted."""
+    job = _job_with_video(job_copy)
+    first, _ = _paths(job)
+    job.clips_dir.mkdir()
+    first.write_bytes(b"unknown")
+    ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
+    assert first.read_bytes() == b"clip"
+
+
+def test_moved_boundaries_are_recut(job_copy):
+    """Re-running refine with new boundaries under the same title must not keep old files."""
+    job = _job_with_video(job_copy)
+    ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
+    a, b = job.read_clips()
+    job.write_clips([a, ClipSpec.between(b.topic_title, b.start + 1, b.end - 5)])
+    assert not all(p.exists() for p in ClipStage().outputs(job)), "stage must not be skipped"
+    clipper = RecordingClipper()
+    ClipStage(clipper=clipper).run(job, PipelineConfig())
+    assert clipper.cut == [(job.read_clips()[1], _paths(job)[1])]
+
+
+def test_changed_encode_settings_are_recut(job_copy):
+    job = _job_with_video(job_copy)
+    ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
+    clipper = RecordingClipper()
+    ClipStage(clipper=clipper).run(job, PipelineConfig(clip=ClipConfig(crf=28)))
+    assert len(clipper.cut) == 2
+
+
+def test_clips_no_longer_wanted_are_deleted(job_copy):
+    job = _job_with_video(job_copy)
+    ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
+    old_second = _paths(job)[1]
+    stranger = job.clips_dir / "my-own-edit.mp4"
+    stranger.write_bytes(b"not ours")
+    job.write_clips(job.read_clips()[:1])
+    assert not all(p.exists() for p in ClipStage().outputs(job)), "stage must not be skipped"
+    ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
+    assert not old_second.exists()
+    assert stranger.exists(), "only files the stage wrote are deleted"
+    assert sorted(p.name for p in job.clips_dir.glob("*.mp4")) == sorted(
+        [_paths(job)[0].name, stranger.name]
+    )
+    assert (job.clips_dir / MANIFEST).is_file()
 
 
 def test_run_with_everything_done_does_nothing(job_copy):
@@ -222,7 +287,7 @@ def test_force_recuts_everything(job_copy):
     ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
     clipper = RecordingClipper()
     ClipStage(clipper=clipper, force=True).run(job, PipelineConfig())
-    assert clipper.calls == [(job.read_clips(), ClipStage().outputs(job))]
+    assert clipper.cut == list(zip(job.read_clips(), _paths(job), strict=True))
 
 
 def test_run_without_input_video(job_copy):
@@ -246,6 +311,7 @@ def test_stage_end_to_end(make_video, tmp_path):
     job.write_clips([ClipSpec.between("Intro", 0.4, 3.0), ClipSpec.between("Café ☕", 4.1, 8.0)])
     ClipStage().run(job, PipelineConfig(clip=ClipConfig(aspect="source")))
     outputs = ClipStage().outputs(job)
+    assert outputs == _paths(job)
     assert [p.name for p in outputs] == ["01-intro.mp4", "02-cafe.mp4"]
     for spec, out in zip(job.read_clips(), outputs, strict=True):
         assert probe(out).duration == pytest.approx(spec.duration, abs=0.1)
