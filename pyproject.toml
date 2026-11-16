@@ -36,4 +36,5 @@ testpaths = ["tests"]
 addopts = "-ra -m 'not model'"
 markers = [
     "model: runs a real ML model (slow, downloads weights); opt in with `pytest -m model`",
+    "ffmpeg: runs the real ffmpeg/ffprobe binaries; skipped automatically if not installed",
 ]

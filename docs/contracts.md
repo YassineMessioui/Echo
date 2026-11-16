@@ -43,3 +43,7 @@ flowchart LR
 - **Changing a contract** (`models.py`, `interfaces.py`, `job.py`, `errors.py`,
   `config.py`, golden fixtures) needs its own PR, so every layer owner can review
   it. Don't fold contract changes into a feature PR.
+- **ffmpeg:** media layers call the binaries only through `echo.ffmpeg` (`ffmpeg()`,
+  `probe()`), which turns failures into `ExternalToolError` / `InvalidInputError`
+  with the stderr tail. In tests, generate inputs with the `make_video` fixture and
+  mark tests that need the real binaries with `@pytest.mark.ffmpeg`.

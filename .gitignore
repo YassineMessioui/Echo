@@ -17,6 +17,9 @@ htmlcov/
 # Echo job artifacts
 jobs/
 
+# Claude Code agent worktrees
+.claude/worktrees/
+
 # OS / editors
 .DS_Store
 .idea/

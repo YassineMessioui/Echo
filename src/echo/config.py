@@ -1,6 +1,7 @@
 """Pipeline configuration. Each layer reads only its own section."""
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -10,6 +11,8 @@ class _Section(BaseModel):
 
 
 class IngestConfig(_Section):
+    # The transcribe stage only accepts 16 kHz mono 16-bit PCM (``transcribe.load_wav``);
+    # other values only make sense once another speech model needs them.
     sample_rate: int = 16_000
     channels: int = 1
 
@@ -52,6 +55,12 @@ class ClipConfig(_Section):
     audio_codec: str = "aac"
     crf: int = Field(default=20, ge=0, le=51)
     preset: str = "veryfast"
+    aspect: Literal["9:16", "source"] = "9:16"
+    """'9:16' outputs 1080x1920 for Reels/Shorts/TikTok; 'source' keeps the original framing."""
+    background: Literal["blur", "black"] = "blur"
+    """Fill for sources narrower than 9:16, which are padded instead of cropped."""
+    crop_x: float = Field(default=0.5, ge=0.0, le=1.0)
+    """Horizontal crop position for 9:16 (0 = left edge, 0.5 = centre, 1 = right edge)."""
 
 
 class PipelineConfig(_Section):
