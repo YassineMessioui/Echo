@@ -195,7 +195,10 @@ def run_pipeline(
         except EchoError as e:
             _fail(job, name, started, t0, str(e), emit)
             raise PipelineError(name, e) from e
-        except BaseException as e:  # a bug (or Ctrl-C): record it, then let it propagate
+        except KeyboardInterrupt:
+            _fail(job, name, started, t0, "interrupted", emit)
+            raise
+        except BaseException as e:  # a bug: record it, then let it propagate
             _fail(job, name, started, t0, f"{type(e).__name__}: {e}".removesuffix(": "), emit)
             raise
         done = StageRecord(

@@ -225,6 +225,18 @@ def test_other_exceptions_propagate_but_are_recorded(job: Job) -> None:
     assert statuses(job)[StageName.TRANSCRIBE] == StageStatus.PENDING
 
 
+def test_ctrl_c_is_recorded_as_interrupted(job: Job) -> None:
+    log: list[StageName] = []
+    stages = [FakeStage(StageName.INGEST, log, error=KeyboardInterrupt()), *fake_stages(log)[1:]]
+
+    with pytest.raises(KeyboardInterrupt):
+        run_pipeline(job, stages, CONFIG)
+
+    record = job.read_meta().stages[StageName.INGEST]
+    assert record.status == StageStatus.FAILED
+    assert record.error == "interrupted"
+
+
 def test_rerun_after_failure_resumes_at_failed_stage(job: Job) -> None:
     log: list[StageName] = []
     stages = fake_stages(log)
