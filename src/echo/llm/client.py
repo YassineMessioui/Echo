@@ -1,8 +1,10 @@
 """LLM clients. Topic extraction depends on ``echo.interfaces.LLMClient`` only, so the
-provider can be swapped; ``OllamaClient`` talks to a local Ollama server."""
+provider can be swapped: ``OllamaClient`` talks to a local Ollama server, and
+``echo.llm.hosted.OpenAICompatibleClient`` to hosted APIs (Groq, Gemini, …)."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
@@ -10,6 +12,7 @@ import httpx
 from echo.config import LLMConfig
 from echo.errors import LLMError
 from echo.interfaces import LLMClient
+from echo.llm.hosted import GENERIC_PROVIDER, PROVIDERS, OpenAICompatibleClient
 
 
 class OllamaClient:
@@ -83,8 +86,17 @@ def _error_text(response: httpx.Response) -> str:
         return response.text
 
 
-def make_llm_client(config: LLMConfig) -> LLMClient:
-    """Build the client for ``config.provider``."""
+def make_llm_client(config: LLMConfig, *, env: Mapping[str, str] | None = None) -> LLMClient:
+    """Build the client for ``config.provider``.
+
+    ``"ollama"`` (default) runs locally. Hosted providers (``"groq"``, ``"openrouter"``,
+    ``"gemini"``, ``"mistral"``, ``"openai"``) and ``"openai-compatible"``
+    use the OpenAI-compatible API; see ``echo.llm.hosted``. ``env`` defaults to
+    ``os.environ`` and is where API keys are read from.
+    """
     if config.provider == "ollama":
         return OllamaClient(config)
-    raise LLMError(f"unknown LLM provider {config.provider!r} (supported: 'ollama')")
+    if config.provider in PROVIDERS or config.provider == GENERIC_PROVIDER:
+        return OpenAICompatibleClient.from_config(config, env=env)
+    supported = ", ".join(repr(p) for p in ["ollama", *PROVIDERS, GENERIC_PROVIDER])
+    raise LLMError(f"unknown LLM provider {config.provider!r} (supported: {supported})")
