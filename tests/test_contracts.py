@@ -246,3 +246,13 @@ def test_job_meta_source_fields_are_optional(golden_job: Job):
         update={"source_url": "https://youtu.be/x", "source_info": {"id": "x", "duration": 61.5}}
     )
     assert type(meta).model_validate_json(linked.model_dump_json()) == linked
+
+
+def test_refine_max_clips_and_caption_font_defaults():
+    from echo.config import CaptionConfig
+
+    assert RefineConfig().max_clips is None
+    assert RefineConfig(max_clips=3).max_clips == 3
+    with pytest.raises(ValidationError):
+        RefineConfig(max_clips=0)
+    assert CaptionConfig().font == "Montserrat ExtraBold"

@@ -26,6 +26,7 @@ resumes that job instead of downloading it again. YouTube needs a JavaScript run
 | `--llm-model TEXT` | `llama3.2:3b` | `LLMConfig.model` |
 | `--min-duration FLOAT` | `15` | `RefineConfig.min_duration` (seconds) |
 | `--max-duration FLOAT` | `60` | `RefineConfig.max_duration` (seconds; 60 is the platform cap) |
+| `--max-clips INT` | all | `RefineConfig.max_clips`: keep the N clips closest to ~37 s, in time order. Changing it on an existing job needs `--from-stage refine` |
 | `--aspect [9:16\|source]` | `9:16` | `ClipConfig.aspect` |
 | `--crop-x FLOAT` | `0.5` | `ClipConfig.crop_x` (0 = left, 1 = right) |
 | `--background [blur\|black]` | `blur` | `ClipConfig.background` |
