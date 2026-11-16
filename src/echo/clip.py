@@ -14,8 +14,9 @@ of its ``ClipSpec`` and ``ClipConfig``. A clip is only reused if its fingerprint
 matches, so re-running refine with new boundaries re-cuts the clips that moved, and
 files from a previous ``clips.json`` that no longer belong to it are deleted.
 
-The 9:16 reframing (#26) plugs in through ``build_ffmpeg_args(..., video_filter=...)``;
-``aspect`` / ``background`` / ``crop_x`` in ``ClipConfig`` are not applied here yet.
+Reframing (#26) happens in the same encode: ``cut_clips`` asks ``echo.reframe`` for the
+``-vf`` filter matching ``ClipConfig.aspect`` / ``background`` / ``crop_x`` (1080x1920 by
+default, none for ``aspect="source"``).
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from echo.ffmpeg import ffmpeg
 from echo.interfaces import Clipper
 from echo.job import Job, _atomic_write
 from echo.models import ClipSpec, StageName
+from echo.reframe import video_filter_for
 
 
 def build_ffmpeg_args(
@@ -86,14 +88,19 @@ def cut_clips(
 ) -> None:
     """Implements ``echo.interfaces.Clipper``.
 
+    The frame is shaped by ``config.aspect`` (see ``echo.reframe``); pass
+    ``video_filter`` to use a different ``-vf`` filter instead.
+
     Raises ValueError if ``clips`` and ``outputs`` differ in length, InvalidInputError if
-    ``video`` is missing and ExternalToolError if ffmpeg fails. Clips cut before a
-    failure are kept.
+    ``video`` is missing or has no video stream and ExternalToolError if ffmpeg fails.
+    Clips cut before a failure are kept.
     """
     if len(clips) != len(outputs):
         raise ValueError(f"got {len(clips)} clips but {len(outputs)} output paths")
     if not video.is_file():
         raise InvalidInputError(f"input video not found: {video}")
+    if video_filter is None and clips:
+        video_filter = video_filter_for(video, config)
     for clip, out in zip(clips, outputs, strict=True):
         _cut_one(video, clip, out, config, video_filter)
 
