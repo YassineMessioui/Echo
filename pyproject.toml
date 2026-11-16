@@ -9,10 +9,11 @@ dependencies = [
     "httpx>=0.28.1",
     "numpy>=2.5.5",
     "pydantic>=2.14.3",
+    "typer>=0.29.1",
 ]
 
 [project.scripts]
-echo-clips = "echo:main"
+echo-clips = "echo.cli:app"
 
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14.0"]

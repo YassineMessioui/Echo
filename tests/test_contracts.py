@@ -225,3 +225,14 @@ def test_fake_transcriber(golden_job: Job):
     transcript = golden_job.read_transcript()
     fake = FakeTranscriber(transcript)
     assert fake.transcribe(Path("audio.wav")) == transcript
+
+
+def test_caption_config_defaults_and_validation():
+    from echo.config import CaptionConfig
+
+    caption = PipelineConfig().caption
+    assert caption.enabled and caption.max_words == 3
+    assert caption.highlight_colour == "#FFD400"
+    for bad in ({"colour": "yellow"}, {"highlight_colour": "#FFF"}, {"max_words": 0}):
+        with pytest.raises(ValidationError):
+            CaptionConfig(**bad)
