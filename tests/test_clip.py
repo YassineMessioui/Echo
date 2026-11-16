@@ -10,6 +10,7 @@ from echo.errors import ArtifactError, ExternalToolError, InvalidInputError
 from echo.ffmpeg import probe
 from echo.job import Job
 from echo.models import ClipSpec, StageName
+from echo.reframe import TARGET
 
 
 @dataclass
@@ -99,7 +100,12 @@ def test_failure_cleans_up_temp_file(tmp_path, monkeypatch):
     monkeypatch.setattr(clip_module, "ffmpeg", failing_ffmpeg)
     out_dir = tmp_path / "clips"
     with pytest.raises(ExternalToolError, match="boom"):
-        cut_clips(video, [ClipSpec.between("a", 0, 1)], [out_dir / "01-a.mp4"], ClipConfig())
+        cut_clips(
+            video,
+            [ClipSpec.between("a", 0, 1)],
+            [out_dir / "01-a.mp4"],
+            ClipConfig(aspect="source"),
+        )
     assert list(out_dir.iterdir()) == []
 
 
@@ -120,7 +126,7 @@ def test_clip_duration_is_accurate(make_video, tmp_path, start, end):
     info = probe(out)
     assert info.duration == pytest.approx(spec.duration, abs=0.1)
     assert info.has_video and info.has_audio
-    assert (info.width, info.height) == (320, 180)
+    assert (info.width, info.height) == TARGET  # default aspect is 9:16
     assert _leftovers(out.parent) == []
 
 
@@ -316,3 +322,35 @@ def test_stage_end_to_end(make_video, tmp_path):
     for spec, out in zip(job.read_clips(), outputs, strict=True):
         assert probe(out).duration == pytest.approx(spec.duration, abs=0.1)
     assert _leftovers(job.clips_dir) == []
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.parametrize("size", ["320x180", "180x320", "240x240"])
+def test_clips_are_vertical_by_default(make_video, tmp_path, size):
+    video = make_video(duration=4, size=size)
+    spec = ClipSpec.between("t", 0.5, 3.0)
+    out = tmp_path / "clips" / "01-t.mp4"
+    cut_clips(video, [spec], [out], ClipConfig())
+    info = probe(out)
+    assert (info.width, info.height) == TARGET
+    assert info.duration == pytest.approx(spec.duration, abs=0.1)
+
+
+@pytest.mark.ffmpeg
+def test_source_aspect_keeps_framing(make_video, tmp_path):
+    video = make_video(duration=3, size="320x180")
+    out = tmp_path / "clips" / "01-t.mp4"
+    cut_clips(video, [ClipSpec.between("t", 0, 2)], [out], ClipConfig(aspect="source"))
+    assert (probe(out).width, probe(out).height) == (320, 180)
+
+
+@pytest.mark.ffmpeg
+def test_stage_outputs_vertical_clips_and_recuts_on_aspect_change(make_video, tmp_path):
+    job = Job(tmp_path / "job")
+    job.root.mkdir()
+    make_video(duration=6, name="src.mp4").replace(job.input_video)
+    job.write_clips([ClipSpec.between("Intro", 0.0, 2.5), ClipSpec.between("Outro", 3.0, 5.5)])
+    ClipStage().run(job, PipelineConfig())
+    assert all((probe(p).width, probe(p).height) == TARGET for p in _paths(job))
+    ClipStage().run(job, PipelineConfig(clip=ClipConfig(aspect="source")))
+    assert all((probe(p).width, probe(p).height) == (320, 180) for p in _paths(job))
