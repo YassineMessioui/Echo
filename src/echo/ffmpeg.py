@@ -29,11 +29,27 @@ def _tail(stderr: str) -> str:
     return "\n".join(stderr.strip().splitlines()[-STDERR_TAIL_LINES:])
 
 
-def run(tool: str, args: list[str]) -> subprocess.CompletedProcess[str]:
-    """Run ``tool`` with ``args``; raise ExternalToolError with the stderr tail on failure."""
+def run(
+    tool: str, args: list[str], *, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run ``tool`` with ``args``; raise ExternalToolError with the stderr tail on failure.
+
+    Output is decoded as UTF-8 (what ffmpeg writes) rather than the locale encoding,
+    which is cp1252 on Windows and would fail on non-ASCII paths or metadata.
+    """
     cmd = [require(tool), *args]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise ExternalToolError(f"{tool} timed out after {timeout} s") from e
     except OSError as e:
         raise ExternalToolError(f"could not run {tool}: {e}") from e
     if result.returncode != 0:
@@ -43,9 +59,9 @@ def run(tool: str, args: list[str]) -> subprocess.CompletedProcess[str]:
     return result
 
 
-def ffmpeg(args: list[str]) -> None:
+def ffmpeg(args: list[str], *, timeout: float | None = None) -> None:
     """Run ffmpeg quietly, overwriting outputs: ``ffmpeg -hide_banner -loglevel error -y ...``."""
-    run("ffmpeg", ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", *args])
+    run("ffmpeg", ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", *args], timeout=timeout)
 
 
 @dataclass(frozen=True)
@@ -74,7 +90,15 @@ def probe(path: Path) -> MediaInfo:
         raise InvalidInputError(f"not a readable media file: {path}\n{e}") from e
     data = json.loads(result.stdout)
     streams = data.get("streams", [])
-    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    # Embedded cover art (e.g. in an .m4a) is a "video" stream with attached_pic set.
+    video = next(
+        (
+            s
+            for s in streams
+            if s.get("codec_type") == "video" and not s.get("disposition", {}).get("attached_pic")
+        ),
+        None,
+    )
     audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
     return MediaInfo(
         duration=float(data.get("format", {}).get("duration", 0.0)),

@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 from echo import ffmpeg
@@ -17,7 +19,7 @@ def test_probe_missing_file(tmp_path):
 
 @pytest.mark.ffmpeg
 def test_failure_includes_stderr_tail(tmp_path):
-    with pytest.raises(ExternalToolError, match="exited with code"):
+    with pytest.raises(ExternalToolError, match=r"(?s)exited with code.*No such file"):
         ffmpeg.ffmpeg(["-i", str(tmp_path / "missing.mp4"), str(tmp_path / "out.wav")])
 
 
@@ -41,3 +43,37 @@ def test_probe_rejects_non_media(tmp_path):
     bogus.write_text("not a video")
     with pytest.raises(InvalidInputError, match="not a readable media file"):
         ffmpeg.probe(bogus)
+
+
+def _fake_tool(monkeypatch):
+    """Make ``run("fake", ...)`` execute the current Python interpreter."""
+    monkeypatch.setattr(ffmpeg, "require", lambda tool: sys.executable)
+
+
+def test_non_ascii_output_is_decoded_as_utf8(monkeypatch):
+    _fake_tool(monkeypatch)
+    script = (
+        "import sys; sys.stderr.buffer.write('Łódź 🎬.mp4: invalid data'.encode()); "
+        "sys.stdout.buffer.write(b'\\xff'); sys.exit(1)"
+    )
+    with pytest.raises(ExternalToolError, match="Łódź 🎬.mp4: invalid data"):
+        ffmpeg.run("fake", ["-c", script])
+
+
+def test_timeout_is_reported(monkeypatch):
+    _fake_tool(monkeypatch)
+    with pytest.raises(ExternalToolError, match="timed out"):
+        ffmpeg.run("fake", ["-c", "import time; time.sleep(5)"], timeout=0.2)
+
+
+@pytest.mark.ffmpeg
+def test_probe_ignores_cover_art(tmp_path, make_video):
+    cover = tmp_path / "cover.png"
+    ffmpeg.ffmpeg(["-f", "lavfi", "-i", "color=red:size=64x64", "-frames:v", "1", str(cover)])
+    audio = tmp_path / "song.m4a"
+    ffmpeg.ffmpeg(
+        ["-f", "lavfi", "-i", "sine=duration=1", "-i", str(cover), "-map", "0:a", "-map", "1:v"]
+        + ["-c:a", "aac", "-c:v", "png", "-disposition:v", "attached_pic", str(audio)]
+    )
+    info = ffmpeg.probe(audio)
+    assert info.has_audio and not info.has_video and info.width is None
