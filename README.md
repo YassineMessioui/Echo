@@ -31,9 +31,9 @@ Echo takes a long video, finds the best moments, cuts them into short vertical c
 **V0: video → vertical topic clips** ([milestone](https://github.com/YassineMessioui/Echo/milestone/1))
 - [x] Data contracts and per-run job directory (#3)
 - [ ] Audio extraction with ffmpeg (#4)
-- [ ] Transcription with faster-whisper and word timestamps (#5)
-- [ ] Topic extraction with a local LLM through Ollama: chunking, extraction, merging (#6–#9)
-- [ ] Boundary refinement. Clips are **15–60 s** and **never longer than 60 s** (#10)
+- [x] Transcription with faster-whisper and word timestamps (#5)
+- [x] Topic extraction with an LLM, local (Ollama) or hosted (Groq, Gemini, …): chunking, extraction, merging (#6–#9); see [docs/llm-providers.md](docs/llm-providers.md)
+- [x] Boundary refinement. Clips are **15–60 s** and **never longer than 60 s** (#10)
 - [ ] Clipping with ffmpeg (#11), output **vertical 9:16 at 1080×1920** by centre crop (#26)
 - [ ] Resumable orchestrator and the `echo-clips run` CLI (#12, #13)
 - [ ] End-to-end test and full README (#14, #15)
@@ -56,7 +56,7 @@ Echo takes a long video, finds the best moments, cuts them into short vertical c
 | Lint / tests     | ruff + pytest, run in GitHub Actions CI             |
 | Video processing | FFmpeg (via `ffmpeg-python` or subprocess)          |
 | Transcription    | faster-whisper (local), word-level timestamps       |
-| Moment selection | Local LLM through [Ollama](https://ollama.com), behind a swappable `LLMClient` interface. It returns segment IDs, never timestamps |
+| Moment selection | An LLM behind a swappable `LLMClient`: local through [Ollama](https://ollama.com) or hosted through any OpenAI-compatible API (Groq by default for hosted). It returns segment IDs, never timestamps |
 | Reframing        | MediaPipe / OpenCV face detection                   |
 | Captions         | ASS subtitles burned in with FFmpeg                 |
 | Queue / jobs     | Start synchronous; move to Celery/RQ + Redis later  |
@@ -79,7 +79,7 @@ Echo/
 │   ├── transcribe.py    # audio.wav → transcript.json (#5)
 │   ├── llm/             # transcript.json → topics.json
 │   │   ├── chunking.py  #   overlapping windows (#6)
-│   │   ├── client.py    #   Ollama client (#7)
+│   │   ├── client.py, hosted.py  #   Ollama + hosted LLM clients (#7)
 │   │   ├── prompts.py, topics.py   #   topic extraction (#8)
 │   │   └── merge.py     #   merge across windows + LLM stage (#9)
 │   ├── refine.py        # topics → clips.json, 15–60 s (#10)
@@ -119,7 +119,7 @@ Requirements: [uv](https://docs.astral.sh/uv/getting-started/installation/) and 
 ```bash
 git clone https://github.com/YassineMessioui/Echo.git && cd Echo
 uv sync                 # creates .venv and installs deps (incl. dev)
-uv run pytest           # tests (real-model tests: uv run pytest -m model)
+uv run pytest           # tests (real Whisper test: uv run pytest -m model)
 uv run ruff check .     # lint
 uv run ruff format .    # format
 ```
