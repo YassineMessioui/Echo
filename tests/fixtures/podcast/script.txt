@@ -1,0 +1,12 @@
+# Script for podcast.mp4, written for this repository. One section per topic:
+# "## <say voice> | <topic title>", then the spoken text.
+# Regenerate the video with ./make_podcast.sh (macOS only: it uses `say`).
+
+## Samantha | Why coffee keeps you awake
+Welcome back to the show. Today we start with coffee, and why it keeps you awake. Caffeine looks a lot like adenosine, a molecule that builds up in your brain the longer you stay awake. Adenosine is what makes you feel sleepy. When caffeine sits on those receptors instead, the signal never arrives, so you feel alert. The effect peaks about an hour after your cup and fades slowly over the afternoon. That is why a coffee at four in the afternoon can still keep you up at midnight. And when the caffeine finally wears off, all that adenosine is still waiting, which explains the famous afternoon crash.
+
+## Daniel | How bicycles stay upright
+Let's change the subject completely and talk about bicycles. Why does a moving bicycle stay upright, while a parked one falls over? For a long time people said it was the gyroscope effect of the spinning wheels. But engineers built bicycles with extra wheels spinning backwards, and those bikes still balanced. The real secret is steering. When a bike starts to lean, the front wheel turns into the lean and moves the wheels back under the rider. The shape of the fork, called the trail, makes this happen automatically. So a bicycle is really steering itself, many times a second, as long as it keeps moving.
+
+## Samantha | Life in the deep ocean
+Our last topic today is the deep ocean. Below about one thousand meters, no sunlight reaches the water at all. It is cold, completely dark, and the pressure is crushing. Yet the deep sea is full of life. Many animals there make their own light, a trick called bioluminescence. The anglerfish dangles a glowing lure in front of its mouth to attract prey. Some shrimp spit out clouds of glowing liquid to confuse predators. Around hot vents on the sea floor, whole communities of worms and crabs live on bacteria that feed on chemicals instead of sunlight. Scientists think we have explored less than a quarter of the deep ocean.
