@@ -69,14 +69,24 @@ def load_wav(path: Path) -> np.ndarray:
     return samples
 
 
-_GPU_RUNTIME_HINTS = ("cublas", "cudnn", "cudart", "libcuda", "cuda driver", "cuda failed")
+# Only "the GPU stack can't be used at all" errors. Ordinary runtime GPU errors share
+# the "cuda"/"cublas"/"cudnn" words (``CUDA failed with error out of memory``,
+# ``cuBLAS failed with status CUBLAS_STATUS_ALLOC_FAILED``) and must NOT fall back:
+# silently switching a large model to the CPU can turn minutes into hours.
+_GPU_UNAVAILABLE_HINTS = (
+    "is not found or cannot be loaded",  # Library cublas64_12.dll is not found or ...
+    "could not load library",
+    "cannot open shared object file",
+    "no cuda-capable device",
+    "cuda driver version is insufficient",
+)
 
 
 def _is_missing_gpu_runtime(error: Exception) -> bool:
-    """CTranslate2's error when the GPU is chosen but the CUDA libraries can't be loaded,
-    e.g. ``Library cublas64_12.dll is not found or cannot be loaded``."""
+    """CTranslate2's error when the GPU was chosen but its libraries/driver can't be
+    loaded, e.g. ``Library cublas64_12.dll is not found or cannot be loaded``."""
     text = str(error).lower()
-    return any(hint in text for hint in _GPU_RUNTIME_HINTS)
+    return any(hint in text for hint in _GPU_UNAVAILABLE_HINTS)
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -108,16 +118,21 @@ class WhisperTranscriber:
                 raise TranscriptionError(
                     f"transcription with {self.model_name} failed: {type(e).__name__}: {e}"
                 ) from e
+            gpu_error = f"{type(e).__name__}: {e}"
         # device="auto" picked the GPU (an NVIDIA card is present) but the CUDA runtime
         # (cuBLAS/cuDNN) isn't installed: fall back to the CPU instead of failing.
         logger.warning("CUDA libraries not found; transcribing on the CPU instead")
-        self.config = self.config.model_copy(update={"device": "cpu"})
+        update: dict[str, str] = {"device": "cpu"}
+        if "16" in self.config.compute_type:  # float16 / int8_float16 / bfloat16: GPU-only
+            update["compute_type"] = "default"
+        self.config = self.config.model_copy(update=update)
         self._model = None
         try:
             return self._run(samples)
         except Exception as e:
             raise TranscriptionError(
-                f"transcription with {self.model_name} failed: {type(e).__name__}: {e}"
+                f"transcription with {self.model_name} failed on the CPU after falling back "
+                f"from CUDA ({gpu_error}): {type(e).__name__}: {e}"
             ) from e
 
     def _run(self, samples: np.ndarray) -> Transcript:

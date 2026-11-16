@@ -274,14 +274,71 @@ def test_explicit_cuda_device_does_not_fall_back(audio: Path):
         transcriber.transcribe(audio)
 
 
-def test_other_errors_do_not_fall_back(audio: Path):
+@pytest.mark.parametrize(
+    "message",
+    [
+        # CTranslate2's real formats for ordinary GPU runtime errors: no fallback.
+        "CUDA failed with error out of memory",
+        "cuBLAS failed with status CUBLAS_STATUS_ALLOC_FAILED",
+        "cuDNN failed with status CUDNN_STATUS_EXECUTION_FAILED",
+    ],
+)
+def test_real_gpu_errors_do_not_fall_back(audio: Path, message: str):
     devices: list[str] = []
 
     def factory(cfg: TranscribeConfig):
         devices.append(cfg.device)
-        raise RuntimeError("out of memory")
+        raise RuntimeError(message)
 
     transcriber = WhisperTranscriber(TranscribeConfig(device="auto"), model_factory=factory)
-    with pytest.raises(TranscriptionError, match="out of memory"):
+    with pytest.raises(TranscriptionError, match=message.split(" with ")[0]):
         transcriber.transcribe(audio)
     assert devices == ["auto"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Library cublas64_12.dll is not found or cannot be loaded",
+        "Could not load library libcudnn_ops.so.9",
+        "libcublas.so.12: cannot open shared object file: No such file or directory",
+        "CUDA failed with error no CUDA-capable device is detected",
+        "CUDA failed with error CUDA driver version is insufficient for CUDA runtime version",
+    ],
+)
+def test_missing_gpu_stack_falls_back(audio: Path, message: str):
+    good = FakeWhisperModel([_segment(0.0, 1.0, "ok")])
+
+    def factory(cfg: TranscribeConfig):
+        if cfg.device == "auto":
+            raise RuntimeError(message)
+        return good
+
+    transcriber = WhisperTranscriber(TranscribeConfig(device="auto"), model_factory=factory)
+    assert [s.text for s in transcriber.transcribe(audio).segments] == ["ok"]
+
+
+def test_cpu_fallback_resets_float16_compute_type(audio: Path):
+    seen: list[tuple[str, str]] = []
+    good = FakeWhisperModel([_segment(0.0, 1.0, "ok")])
+
+    def factory(cfg: TranscribeConfig):
+        seen.append((cfg.device, cfg.compute_type))
+        if cfg.device == "auto":
+            raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+        return good
+
+    config = TranscribeConfig(device="auto", compute_type="float16")
+    WhisperTranscriber(config, model_factory=factory).transcribe(audio)
+    assert seen == [("auto", "float16"), ("cpu", "default")]
+
+
+def test_failed_cpu_retry_keeps_the_cuda_error(audio: Path):
+    def factory(cfg: TranscribeConfig):
+        if cfg.device == "auto":
+            raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+        raise RuntimeError("disk full")
+
+    transcriber = WhisperTranscriber(TranscribeConfig(device="auto"), model_factory=factory)
+    with pytest.raises(TranscriptionError, match=r"(?s)cublas64_12\.dll.*disk full"):
+        transcriber.transcribe(audio)
