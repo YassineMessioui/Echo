@@ -6,6 +6,7 @@ so they must be stable for a given transcript.
 
 from __future__ import annotations
 
+import logging
 import wave
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -39,6 +40,8 @@ def _load_whisper(config: TranscribeConfig) -> WhisperModel:
     return WhisperModel(config.model_size, device=config.device, compute_type=config.compute_type)
 
 
+logger = logging.getLogger(__name__)
+
 WHISPER_SAMPLE_RATE = 16_000
 
 
@@ -66,6 +69,16 @@ def load_wav(path: Path) -> np.ndarray:
     return samples
 
 
+_GPU_RUNTIME_HINTS = ("cublas", "cudnn", "cudart", "libcuda", "cuda driver", "cuda failed")
+
+
+def _is_missing_gpu_runtime(error: Exception) -> bool:
+    """CTranslate2's error when the GPU is chosen but the CUDA libraries can't be loaded,
+    e.g. ``Library cublas64_12.dll is not found or cannot be loaded``."""
+    text = str(error).lower()
+    return any(hint in text for hint in _GPU_RUNTIME_HINTS)
+
+
 def _clamp(value: float, low: float, high: float) -> float:
     return min(max(value, low), high)
 
@@ -89,17 +102,32 @@ class WhisperTranscriber:
             raise TranscriptionError(f"audio file not found: {audio}")
         samples = load_wav(audio)
         try:
-            if self._model is None:
-                self._model = self._model_factory(self.config)
-            raw_segments, info = self._model.transcribe(
-                samples, language=self.config.language, word_timestamps=True
-            )
-            # Segments are a lazy generator: decoding happens while iterating.
-            return self._build(list(raw_segments), language=info.language, duration=info.duration)
-        except Exception as e:  # model download/load or decoding failures
+            return self._run(samples)
+        except Exception as e:
+            if not (self.config.device == "auto" and _is_missing_gpu_runtime(e)):
+                raise TranscriptionError(
+                    f"transcription with {self.model_name} failed: {type(e).__name__}: {e}"
+                ) from e
+        # device="auto" picked the GPU (an NVIDIA card is present) but the CUDA runtime
+        # (cuBLAS/cuDNN) isn't installed: fall back to the CPU instead of failing.
+        logger.warning("CUDA libraries not found; transcribing on the CPU instead")
+        self.config = self.config.model_copy(update={"device": "cpu"})
+        self._model = None
+        try:
+            return self._run(samples)
+        except Exception as e:
             raise TranscriptionError(
                 f"transcription with {self.model_name} failed: {type(e).__name__}: {e}"
             ) from e
+
+    def _run(self, samples: np.ndarray) -> Transcript:
+        if self._model is None:
+            self._model = self._model_factory(self.config)
+        raw_segments, info = self._model.transcribe(
+            samples, language=self.config.language, word_timestamps=True
+        )
+        # Segments are a lazy generator: decoding happens while iterating.
+        return self._build(list(raw_segments), language=info.language, duration=info.duration)
 
     @staticmethod
     def _build(raw_segments: list[Any], *, language: str, duration: float) -> Transcript:

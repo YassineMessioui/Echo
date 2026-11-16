@@ -240,3 +240,48 @@ def test_real_whisper_model(tmp_path: Path):
     if "ECHO_TEST_AUDIO" in os.environ:
         assert transcript.segments, "expected speech in ECHO_TEST_AUDIO"
         assert any(s.words for s in transcript.segments)
+
+
+def test_auto_device_falls_back_to_cpu_without_cuda_libraries(audio: Path):
+    """An NVIDIA card makes device="auto" pick CUDA; without the CUDA runtime installed,
+    CTranslate2 fails on first use. Retry on the CPU instead of failing the stage."""
+    good = FakeWhisperModel([_segment(0.0, 1.0, "hello")])
+
+    class NoCuda:
+        def transcribe(self, audio, **kwargs):
+            raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+
+    devices: list[str] = []
+
+    def factory(cfg: TranscribeConfig):
+        devices.append(cfg.device)
+        return NoCuda() if cfg.device == "auto" else good
+
+    transcriber = WhisperTranscriber(TranscribeConfig(device="auto"), model_factory=factory)
+    transcript = transcriber.transcribe(audio)
+    assert [s.text for s in transcript.segments] == ["hello"]
+    assert devices == ["auto", "cpu"]
+    transcriber.transcribe(audio)
+    assert devices == ["auto", "cpu"], "stays on the CPU afterwards"
+
+
+def test_explicit_cuda_device_does_not_fall_back(audio: Path):
+    def factory(cfg: TranscribeConfig):
+        raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+
+    transcriber = WhisperTranscriber(TranscribeConfig(device="cuda"), model_factory=factory)
+    with pytest.raises(TranscriptionError, match="cublas64_12"):
+        transcriber.transcribe(audio)
+
+
+def test_other_errors_do_not_fall_back(audio: Path):
+    devices: list[str] = []
+
+    def factory(cfg: TranscribeConfig):
+        devices.append(cfg.device)
+        raise RuntimeError("out of memory")
+
+    transcriber = WhisperTranscriber(TranscribeConfig(device="auto"), model_factory=factory)
+    with pytest.raises(TranscriptionError, match="out of memory"):
+        transcriber.transcribe(audio)
+    assert devices == ["auto"]
