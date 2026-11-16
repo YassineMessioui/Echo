@@ -321,13 +321,28 @@ def test_run_without_clips_json(tmp_path):
         ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
 
 
+def _no_captions(**sections) -> PipelineConfig:
+    """Framing-only stage tests: these jobs have no transcript to caption from."""
+    from echo.config import CaptionConfig
+
+    return PipelineConfig(caption=CaptionConfig(enabled=False), **sections)
+
+
+def test_captions_need_a_transcript(job_copy):
+    job = _job_with_video(job_copy)
+    job.transcript_path.unlink()
+    with pytest.raises(ArtifactError, match="caption.enabled"):
+        ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
+    ClipStage(clipper=RecordingClipper()).run(job, _no_captions())  # fine without captions
+
+
 @pytest.mark.ffmpeg
 def test_stage_end_to_end(make_video, tmp_path):
     job = Job(tmp_path / "job")
     job.root.mkdir()
     make_video(duration=10, name="src.mp4").replace(job.input_video)
     job.write_clips([ClipSpec.between("Intro", 0.4, 3.0), ClipSpec.between("Café ☕", 4.1, 8.0)])
-    ClipStage().run(job, PipelineConfig(clip=ClipConfig(aspect="source")))
+    ClipStage().run(job, _no_captions(clip=ClipConfig(aspect="source")))
     outputs = ClipStage().outputs(job)
     assert outputs == _paths(job)
     assert [p.name for p in outputs] == ["01-intro.mp4", "02-cafe.mp4"]
@@ -362,9 +377,9 @@ def test_stage_outputs_vertical_clips_and_recuts_on_aspect_change(make_video, tm
     job.root.mkdir()
     make_video(duration=6, name="src.mp4").replace(job.input_video)
     job.write_clips([ClipSpec.between("Intro", 0.0, 2.5), ClipSpec.between("Outro", 3.0, 5.5)])
-    ClipStage().run(job, PipelineConfig())
+    ClipStage().run(job, _no_captions())
     assert all((probe(p).width, probe(p).height) == TARGET for p in _paths(job))
-    ClipStage().run(job, PipelineConfig(clip=ClipConfig(aspect="source")))
+    ClipStage().run(job, _no_captions(clip=ClipConfig(aspect="source")))
     assert all((probe(p).width, probe(p).height) == (320, 180) for p in _paths(job))
 
 

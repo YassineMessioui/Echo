@@ -181,6 +181,11 @@ class ClipStage:
         job.clips_dir.mkdir(parents=True, exist_ok=True)
         manifest = {k: v for k, v in _read_manifest(job).items() if (job.clips_dir / k).exists()}
         burn = config.caption.enabled and bool(clips)
+        if burn and not job.transcript_path.is_file():
+            raise ArtifactError(
+                f"captions need {job.transcript_path}; run the transcribe stage first, or "
+                "turn captions off (caption.enabled = false)"
+            )
         transcript = job.read_transcript() if burn else None
         style = CaptionStyle.from_config(config.caption)
 
