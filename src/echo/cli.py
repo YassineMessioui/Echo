@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Annotated, Any, get_args
 
 import typer
+from dotenv import find_dotenv, load_dotenv
 from pydantic import ValidationError
 
 from echo.clip import clip_paths
@@ -80,6 +81,9 @@ def _main(
     ] = None,
 ) -> None:
     """Turn a long video into short vertical clips."""
+    # API keys (GROQ_API_KEY, MISTRAL_API_KEY, ...) can live in a git-ignored .env, found
+    # from the current directory upwards. Variables already set in the shell win.
+    load_dotenv(find_dotenv(usecwd=True), override=False)
 
 
 def _build_config(
