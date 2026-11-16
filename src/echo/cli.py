@@ -8,6 +8,7 @@ reopens) the job and hands it to ``run_pipeline``. Option defaults are read from
 from __future__ import annotations
 
 import logging
+import os
 import traceback
 from enum import StrEnum
 from importlib.metadata import PackageNotFoundError, version
@@ -85,6 +86,24 @@ def _main(
     # API keys (GROQ_API_KEY, MISTRAL_API_KEY, ...) can live in a git-ignored .env, found
     # from the current directory upwards. Variables already set in the shell win.
     load_dotenv(find_dotenv(usecwd=True), override=False)
+
+
+QUIET_ENV = {
+    # Hugging Face: the Windows "symlinks not supported" warning and the
+    # "unauthenticated requests" notice look like errors on a first run (#65).
+    "HF_HUB_DISABLE_SYMLINKS_WARNING": "1",
+    "HF_HUB_VERBOSITY": "error",
+    # CTranslate2: its float16->float32 note on CPU (-1 = errors only).
+    "CT2_VERBOSE": "-1",
+}
+
+
+def _quiet_model_libraries() -> None:
+    """Quiet the model libraries for a normal (non --verbose) run. Values the user set
+    win, and nothing has imported huggingface_hub/ctranslate2 yet (they read these at
+    import), since faster-whisper is imported lazily by the transcribe stage."""
+    for name, value in QUIET_ENV.items():
+        os.environ.setdefault(name, value)
 
 
 def _check_captions_supported(config: PipelineConfig) -> None:
@@ -210,6 +229,8 @@ def run(
     """Run the pipeline on VIDEO, resuming any stages already done."""
     if verbose:
         logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s: %(message)s")
+    else:
+        _quiet_model_libraries()
 
     config = _build_config(
         jobs_dir=jobs_dir,
