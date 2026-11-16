@@ -22,11 +22,11 @@ from pathlib import Path
 from echo.models import ClipSpec, Transcript, Word
 
 PLAY_RES = (1080, 1920)
+"""Caption coordinates are laid out for the 9:16 output; libass scales them otherwise."""
 
 FONTS_DIR = Path(__file__).parent / "fonts"
 """Fonts shipped with Echo (Montserrat ExtraBold, SIL Open Font License; see OFL.txt).
 libass looks here first, so captions render the same on every machine (#64)."""
-"""Caption coordinates are laid out for the 9:16 output; libass scales them otherwise."""
 
 
 @dataclass(frozen=True)
