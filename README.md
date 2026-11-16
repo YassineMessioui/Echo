@@ -26,23 +26,25 @@ Echo takes a long video, finds the best moments, cuts them into short vertical c
 
 ---
 
-## Features
+## Roadmap
 
-**MVP**
-- [ ] CLI: `echo run <video>` produces clips in `output/`
-- [ ] Transcription with word timestamps
-- [ ] Highlight selection (LLM over the transcript)
-- [ ] Cutting plus 9:16 reframe (center crop first, face tracking later)
-- [ ] Burned-in captions
-- [ ] Upload to YouTube Shorts (the easiest API to start with)
+**V0: video → vertical topic clips** ([milestone](https://github.com/YassineMessioui/Echo/milestone/1))
+- [ ] Data contracts and per-run job directory (#3)
+- [ ] Audio extraction with ffmpeg (#4)
+- [ ] Transcription with faster-whisper and word timestamps (#5)
+- [ ] Topic extraction with a local LLM through Ollama: chunking, extraction, merging (#6–#9)
+- [ ] Boundary refinement. Clips are **15–60 s** and **never longer than 60 s** (#10)
+- [ ] Clipping with ffmpeg (#11), output **vertical 9:16 at 1080×1920** by centre crop
+- [ ] Resumable orchestrator and the `echo-clips run` CLI (#12, #13)
+- [ ] End-to-end test and full README (#14, #15)
 
-**Next**
-- [ ] TikTok, Instagram and Facebook uploaders
-- [ ] Face or speaker tracking for smart reframing
-- [ ] Review step: approve or reject clips before they are published
-- [ ] Scheduling and a posting queue
-- [ ] Simple web dashboard
-- [ ] Per-platform analytics fed back into clip scoring
+**Later**
+- [ ] Smart reframing that follows the speaker (#16)
+- [ ] Burned-in captions (#17)
+- [ ] Clip scoring: keep only the most engaging moments (#21)
+- [ ] Speaker diarization (#22)
+- [ ] Web UI, job queue, S3 storage (#19, #20, #23)
+- [ ] Publishing to YouTube Shorts, TikTok, Instagram Reels and Facebook Reels, with titles, hashtags, a review step and scheduling (_no issues yet_)
 
 ---
 
@@ -53,8 +55,8 @@ Echo takes a long video, finds the best moments, cuts them into short vertical c
 | Language         | Python 3.12, managed with [uv](https://docs.astral.sh/uv/) |
 | Lint / tests     | ruff + pytest, run in GitHub Actions CI             |
 | Video processing | FFmpeg (via `ffmpeg-python` or subprocess)          |
-| Transcription    | Whisper / faster-whisper (local) or a hosted STT API |
-| Moment selection | LLM over the timestamped transcript, plus heuristics |
+| Transcription    | faster-whisper (local), word-level timestamps       |
+| Moment selection | Local LLM through [Ollama](https://ollama.com), behind a swappable `LLMClient` interface. It returns segment IDs, never timestamps |
 | Reframing        | MediaPipe / OpenCV face detection                   |
 | Captions         | ASS subtitles burned in with FFmpeg                 |
 | Queue / jobs     | Start synchronous; move to Celery/RQ + Redis later  |
@@ -110,25 +112,22 @@ Requirements: [uv](https://docs.astral.sh/uv/getting-started/installation/) and 
 ```bash
 git clone https://github.com/YassineMessioui/Echo.git && cd Echo
 uv sync                 # creates .venv and installs deps (incl. dev)
-uv run echo             # run the CLI
 uv run pytest           # tests
 uv run ruff check .     # lint
 uv run ruff format .    # format
 ```
 
-Planned once the pipeline exists:
+Planned once the V0 pipeline exists (#13). The CLI is called `echo-clips` because `echo` clashes with the shell builtin:
 
 ```bash
-cp .env.example .env              # add API keys / OAuth secrets
-cp config.example.yaml config.yaml
-uv run echo run path/to/video.mp4 --max-clips 5 --dry-run
+uv run echo-clips run path/to/video.mp4 --max-duration 60 --aspect 9:16
 ```
 
-`--dry-run` renders the clips without uploading anything.
+Output goes to `jobs/<job_id>/clips/<nn>-<slug>.mp4`. Runs can be resumed: use `--force` to redo every stage, or `--from-stage <name>` to redo one stage and everything after it.
 
 ## Contributing
 
-`main` is protected: every change goes through a pull request, and the `lint` and `test` CI checks must pass before merging.
+`main` is protected. Every change goes through a pull request, which needs **1 approval from the other owner**, and the `lint` and `test` CI checks must pass before merging.
 
 ---
 
@@ -163,7 +162,7 @@ publish:
 - Local processing or cloud (GPU for Whisper and face tracking)?
 - Who owns the source videos? We need a rights and permissions policy before posting content we didn't create.
 - Is this a CLI tool for ourselves, or a SaaS with user accounts?
-- Which LLM for moment selection, and what is the budget per video?
+- Which Ollama model gives good topic boundaries on our hardware?
 
 ## License
 
