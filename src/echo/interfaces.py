@@ -109,9 +109,18 @@ class BoundaryRefiner(Protocol):
 
 class Clipper(Protocol):
     def __call__(
-        self, video: Path, clips: list[ClipSpec], outputs: list[Path], config: ClipConfig
+        self,
+        video: Path,
+        clips: list[ClipSpec],
+        outputs: list[Path],
+        config: ClipConfig,
+        *,
+        extra_filter: str | None = None,
     ) -> None:
         """Cut ``clips[i]`` from ``video`` into ``outputs[i]`` (frame-accurate re-encode).
+
+        ``extra_filter`` is a ``-vf`` filter chained *after* the framing set by ``config``
+        (e.g. burned-in captions, #17), in the same encode.
 
         Raises ExternalToolError.
         """
