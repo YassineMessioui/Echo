@@ -14,6 +14,9 @@ from echo.job import Job
 from echo.models import StageName, Topic
 
 DEFAULT_IOU_THRESHOLD = 0.5
+DEFAULT_CONTAINMENT_THRESHOLD = 0.8
+"""A topic cut off by a window edge is a short span mostly inside the full one: its
+IoU can be low (3 of 8 segments), so containment is checked too."""
 
 
 def span_iou(a: Topic, b: Topic) -> float:
@@ -23,6 +26,14 @@ def span_iou(a: Topic, b: Topic) -> float:
         return 0.0
     union = _length(a) + _length(b) - inter
     return inter / union
+
+
+def span_containment(a: Topic, b: Topic) -> float:
+    """Share of the shorter span that lies inside the other one."""
+    inter = min(a.end_segment, b.end_segment) - max(a.start_segment, b.start_segment) + 1
+    if inter <= 0:
+        return 0.0
+    return inter / min(_length(a), _length(b))
 
 
 def _length(topic: Topic) -> int:
@@ -47,12 +58,17 @@ def _union(a: Topic, b: Topic) -> Topic:
 
 
 def merge_topics(
-    per_window: list[list[Topic]], *, iou_threshold: float = DEFAULT_IOU_THRESHOLD
+    per_window: list[list[Topic]],
+    *,
+    iou_threshold: float = DEFAULT_IOU_THRESHOLD,
+    containment_threshold: float = DEFAULT_CONTAINMENT_THRESHOLD,
 ) -> list[Topic]:
     """Implements ``echo.interfaces.TopicMerger``.
 
-    Topics from *different* windows whose spans have IoU ≥ ``iou_threshold`` are the
-    same topic seen twice (windows overlap) and are merged; the most overlapping pair
+    Topics from *different* windows whose spans have IoU ≥ ``iou_threshold``, or where
+    the shorter lies at least ``containment_threshold`` inside the other (a topic cut
+    off at a window edge), are the same topic seen twice (windows overlap) and are
+    merged; the most overlapping pair
     is merged first, until no pair qualifies. Topics from the same window are never
     merged with each other: the LLM saw them side by side and chose to separate them.
     The result is sorted by ``start_segment``.
@@ -68,7 +84,11 @@ def merge_topics(
                 if a.windows & b.windows:
                     continue
                 iou = span_iou(a.topic, b.topic)
-                if iou >= iou_threshold and (best is None or iou > best[0]):
+                same = (
+                    iou >= iou_threshold
+                    or span_containment(a.topic, b.topic) >= containment_threshold
+                )
+                if same and (best is None or iou > best[0]):
                     best = (iou, i, j)
         if best is None:
             break

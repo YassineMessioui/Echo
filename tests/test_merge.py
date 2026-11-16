@@ -6,7 +6,7 @@ from echo.config import ChunkConfig, PipelineConfig
 from echo.errors import ArtifactError
 from echo.interfaces import Stage
 from echo.job import Job
-from echo.llm.merge import LLMStage, merge_topics, span_iou
+from echo.llm.merge import LLMStage, merge_topics, span_containment, span_iou
 from echo.models import StageName, Topic, Transcript, TranscriptWindow
 
 
@@ -31,6 +31,24 @@ def _t(start: int, end: int, title: str | None = None) -> Topic:
 )
 def test_span_iou(a, b, iou):
     assert span_iou(_t(*a), _t(*b)) == pytest.approx(iou)
+
+
+def test_topic_cut_off_at_window_edge_is_merged():
+    """Seen live with Groq: window 0 ended at segment 15, cutting a topic to 13–15,
+    while window 1 saw all of it (13–20). IoU is only 3/8, but 13–15 lies inside."""
+    cut, full = _t(13, 15, "Why the 20% rule fails"), _t(13, 20, "Smart savings")
+    assert span_iou(cut, full) == pytest.approx(3 / 8)
+    assert span_containment(cut, full) == 1.0
+    assert merge_topics([[_t(2, 11, "Sleep"), cut], [full, _t(22, 29, "EVs")]]) == [
+        _t(2, 11, "Sleep"),
+        Topic(title="Smart savings", summary=full.summary, start_segment=13, end_segment=20),
+        _t(22, 29, "EVs"),
+    ]
+
+
+def test_mostly_contained_but_below_threshold_stays_separate():
+    a, b = _t(0, 9, "A"), _t(6, 20, "B")  # B's 4 of A's 10 segments: containment 0.4
+    assert merge_topics([[a], [b]]) == [a, b]
 
 
 def test_same_topic_in_two_windows_becomes_one():
