@@ -97,6 +97,7 @@ def test_help_lists_every_option():
         "--llm-model",
         "--min-duration",
         "--max-duration",
+        "--max-clips",
         "--aspect",
         "--crop-x",
         "--background",
@@ -152,6 +153,7 @@ def test_options_map_to_config_fields(fake, video, jobs_dir):
         "--llm-model", "openai/gpt-oss-120b",
         "--min-duration", "20",
         "--max-duration", "45",
+        "--max-clips", "3",
         "--aspect", "source",
         "--crop-x", "0.25",
         "--background", "black",
@@ -162,6 +164,7 @@ def test_options_map_to_config_fields(fake, video, jobs_dir):
     assert (c.transcribe.model_size, c.transcribe.language) == ("medium", "fr")
     assert (c.llm.provider, c.llm.model) == ("groq", "openai/gpt-oss-120b")
     assert (c.refine.min_duration, c.refine.max_duration) == (20.0, 45.0)
+    assert c.refine.max_clips == 3
     assert (c.clip.aspect, c.clip.crop_x, c.clip.background) == ("source", 0.25, "black")
     # untouched fields keep their defaults
     defaults = PipelineConfig()
@@ -321,3 +324,9 @@ def test_dotenv_is_loaded_without_overriding_the_shell(fake, video, jobs_dir, mo
     finally:
         os.environ.pop("MISTRAL_API_KEY", None)  # load_dotenv sets it outside monkeypatch
     assert seen == {"mistral": "from-dotenv", "groq": "from-shell"}
+
+
+def test_max_clips_defaults_to_all_and_rejects_zero(fake, video, jobs_dir):
+    assert run(video, jobs_dir).exit_code == 0
+    assert fake.config.refine.max_clips is None
+    assert run(video, jobs_dir, "--max-clips", "0").exit_code == 2
