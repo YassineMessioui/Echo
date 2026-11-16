@@ -6,6 +6,8 @@ so they must be stable for a given transcript.
 
 from __future__ import annotations
 
+import logging
+import os
 import wave
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -33,11 +35,42 @@ class _WhisperLike(Protocol):
 ModelFactory = Callable[[TranscribeConfig], _WhisperLike]
 
 
+# Approximate download sizes, for the one-line first-run notice.
+_MODEL_SIZES = {"tiny": "75 MB", "base": "145 MB", "small": "480 MB", "medium": "1.5 GB"}
+
+
+def _quiet_model_libraries() -> None:
+    """Silence warnings that look like errors to a new user on the first run (#65):
+    Hugging Face's "symlinks not supported on Windows" and "unauthenticated requests"
+    notices, and CTranslate2's float16→float32 note on CPU. Values the user set win.
+    Must run before huggingface_hub is first imported (it reads these at import)."""
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+    os.environ.setdefault("HF_HUB_VERBOSITY", "error")
+
+
+def _announce_download(model_size: str) -> None:
+    """Log one clear line when the model isn't in the local cache yet."""
+    from faster_whisper.utils import download_model
+
+    try:
+        download_model(model_size, local_files_only=True)
+    except Exception:  # not cached (or a custom path): it will be downloaded now
+        size = _MODEL_SIZES.get(model_size)
+        detail = f" (~{size}, first run only)" if size else " (first run only)"
+        logger.warning('downloading whisper model "%s"%s', model_size, detail)
+
+
 def _load_whisper(config: TranscribeConfig) -> WhisperModel:
+    _quiet_model_libraries()
+    import ctranslate2
     from faster_whisper import WhisperModel  # heavy import, only when actually transcribing
 
+    ctranslate2.set_log_level(logging.ERROR)
+    _announce_download(config.model_size)
     return WhisperModel(config.model_size, device=config.device, compute_type=config.compute_type)
 
+
+logger = logging.getLogger(__name__)
 
 WHISPER_SAMPLE_RATE = 16_000
 

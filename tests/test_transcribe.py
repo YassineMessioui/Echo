@@ -240,3 +240,36 @@ def test_real_whisper_model(tmp_path: Path):
     if "ECHO_TEST_AUDIO" in os.environ:
         assert transcript.segments, "expected speech in ECHO_TEST_AUDIO"
         assert any(s.words for s in transcript.segments)
+
+
+# --- first run on Windows (#65) ---------------------------------------------------------
+
+
+def test_quiet_model_libraries_sets_defaults_without_overriding(monkeypatch):
+    from echo import transcribe
+
+    monkeypatch.delenv("HF_HUB_DISABLE_SYMLINKS_WARNING", raising=False)
+    monkeypatch.setenv("HF_HUB_VERBOSITY", "debug")  # the user's own choice wins
+    transcribe._quiet_model_libraries()
+    assert os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] == "1"
+    assert os.environ["HF_HUB_VERBOSITY"] == "debug"
+
+
+def test_first_download_is_announced_once(monkeypatch, caplog):
+    import faster_whisper.utils
+
+    from echo import transcribe
+
+    def not_cached(size, local_files_only=False):
+        raise FileNotFoundError(size)
+
+    monkeypatch.setattr(faster_whisper.utils, "download_model", not_cached)
+    with caplog.at_level("WARNING", logger="echo.transcribe"):
+        transcribe._announce_download("small")
+    assert caplog.messages == ['downloading whisper model "small" (~480 MB, first run only)']
+
+    caplog.clear()
+    monkeypatch.setattr(faster_whisper.utils, "download_model", lambda *a, **k: "/cache/small")
+    with caplog.at_level("WARNING", logger="echo.transcribe"):
+        transcribe._announce_download("small")
+    assert caplog.messages == [], "nothing printed once the model is cached"
