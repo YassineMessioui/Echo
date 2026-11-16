@@ -2,7 +2,7 @@
 
 Echo takes a long video, finds the best moments, cuts them into short vertical clips (60 seconds max), and posts them to **TikTok, YouTube Shorts, Instagram Reels and Facebook Reels** automatically.
 
-> **Status:** V0 in progress. The data contracts are in place and the pipeline stages are being built in parallel. The stack below can still change.
+> **Status:** V0 in progress. Done: data contracts, transcription, topic extraction (local or hosted LLM) and clip boundaries. Still to build: audio extraction, cutting the clips with ffmpeg, the orchestrator and the `echo-clips` CLI. The stack below can still change.
 
 ---
 
@@ -75,7 +75,7 @@ Echo/
 ├── src/echo/
 │   ├── models.py, interfaces.py, job.py, config.py, errors.py   # contracts (#3)
 │   ├── testing.py       # fakes for tests (FakeLLMClient, FakeTranscriber)
-│   ├── ingest.py        # input.mp4 → audio.wav (#4)
+│   ├── ingest.py        # input.mp4 → audio.wav (#4, to do)
 │   ├── transcribe.py    # audio.wav → transcript.json (#5)
 │   ├── llm/             # transcript.json → topics.json
 │   │   ├── chunking.py  #   overlapping windows (#6)
@@ -83,11 +83,13 @@ Echo/
 │   │   ├── prompts.py, topics.py   #   topic extraction (#8)
 │   │   └── merge.py     #   merge across windows + LLM stage (#9)
 │   ├── refine.py        # topics → clips.json, 15–60 s (#10)
-│   ├── clip.py          # clips/<nn>-<slug>.mp4 (#11, #26)
-│   ├── pipeline.py      # orchestrator (#12)
-│   └── cli.py           # echo-clips (#13)
+│   ├── clip.py          # clips/<nn>-<slug>.mp4 (#11, #26, to do)
+│   ├── pipeline.py      # orchestrator (#12, to do)
+│   └── cli.py           # echo-clips (#13, to do)
 ├── tests/               # incl. golden fixtures in tests/fixtures/golden/
-├── docs/contracts.md
+├── docs/
+│   ├── contracts.md     # layer contracts
+│   └── llm-providers.md # choosing a local or hosted LLM
 ├── .github/workflows/   # CI (lint, test on Linux + Windows, build) + release
 ├── pyproject.toml
 └── README.md
@@ -124,6 +126,8 @@ uv run ruff check .     # lint
 uv run ruff format .    # format
 ```
 
+Topic extraction needs an LLM: either a free hosted one (e.g. set `GROQ_API_KEY` from [console.groq.com/keys](https://console.groq.com/keys) and use `llm.provider = "groq"`) or a local one through [Ollama](https://ollama.com). See [docs/llm-providers.md](docs/llm-providers.md). Tests don't need either.
+
 Planned once the V0 pipeline exists (#13). The CLI is called `echo-clips` because `echo` clashes with the shell builtin:
 
 ```bash
@@ -134,7 +138,7 @@ Output goes to `jobs/<job_id>/clips/<nn>-<slug>.mp4`. Runs can be resumed: use `
 
 ## Contributing
 
-`main` is protected. Every change goes through a pull request, which needs **1 approval from the other owner**, and the `lint` and `test` CI checks must pass before merging.
+Every change goes through a pull request on a branch. Ask the other owner to review it, and merge once they approve and the `lint` and `test` CI checks pass (on Linux and Windows).
 
 ---
 
@@ -169,7 +173,7 @@ publish:
 - Local processing or cloud (GPU for Whisper and face tracking)?
 - Who owns the source videos? We need a rights and permissions policy before posting content we didn't create.
 - Is this a CLI tool for ourselves, or a SaaS with user accounts?
-- Which Ollama model gives good topic boundaries on our hardware?
+- Which LLM gives the best topic boundaries? First result: Groq's `openai/gpt-oss-120b` found exactly the right three topics on a 2-minute test podcast. Still to try on real long episodes, and locally with Ollama.
 
 ## License
 
