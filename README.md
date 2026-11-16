@@ -2,7 +2,7 @@
 
 Echo takes a long video, finds the best moments, cuts them into short vertical clips (60 seconds max), and posts them to **TikTok, YouTube Shorts, Instagram Reels and Facebook Reels** automatically.
 
-> **Status:** V0 in progress. Done: data contracts, transcription, topic extraction (local or hosted LLM) and clip boundaries. Still to build: audio extraction, cutting the clips with ffmpeg, the orchestrator and the `echo-clips` CLI. The stack below can still change.
+> **Status:** V0 in progress. Done: data contracts, every pipeline stage (audio extraction, transcription, topic extraction with a local or hosted LLM, clip boundaries, cutting 9:16 clips with ffmpeg). In progress: the orchestrator, the `echo-clips` CLI, the end-to-end test and this README (#12–#15). Publishing comes later. The stack below can still change.
 
 ---
 
@@ -24,23 +24,48 @@ Echo takes a long video, finds the best moments, cuts them into short vertical c
    - optionally add a title, branding or an outro
 5. **Publish:** generate a title, description and hashtags for each clip, then upload it to each enabled platform, either right away or on a schedule.
 
+### The V0 pipeline
+
+V0 covers steps 1–4 for local files, without captions. Each stage reads the previous stage's artifact from the job directory and writes its own:
+
+```mermaid
+flowchart LR
+  V["video"] -->|"input.mp4"| I["ingest"]
+  I -->|"audio.wav"| T["transcribe"]
+  T -->|"transcript.json"| C
+  subgraph L["llm"]
+    direction LR
+    C["chunk"] --> E["extract"] --> M["merge"]
+  end
+  M -->|"topics.json"| R["refine"]
+  T -.->|"transcript.json"| R
+  R -->|"clips.json"| K["clip"]
+  V -.->|"input.mp4"| K
+  K -->|"clips/nn-slug.mp4"| O["9:16 clips"]
+```
+
+- **The LLM returns segment ids, never timestamps.** It sees numbered transcript lines and answers with `start_segment`/`end_segment`; refine turns those into times from the transcript. A model can't invent a timestamp, and every clip starts and ends on a segment boundary.
+- **Retries:** an answer that isn't valid JSON or uses ids outside its window is sent back to the LLM with the error, up to `llm.max_retries` (2) times. Provider errors (down, bad key, rate limit) aren't retried: the stage fails with a clear message.
+- **Chunking:** long transcripts are split into overlapping windows (3000 tokens, 5 segments of overlap). Topics found in several windows are merged by span overlap.
+- **Resumability:** a stage is skipped when its outputs already exist, so re-running a job resumes at the first stage that hasn't finished. `job.json` records each stage's status. The clip stage also re-cuts only the clips whose boundaries or settings changed (`clips/manifest.json`).
+
 ---
 
 ## Roadmap
 
 **V0: video → vertical topic clips** ([milestone](https://github.com/YassineMessioui/Echo/milestone/1))
 - [x] Data contracts and per-run job directory (#3)
-- [ ] Audio extraction with ffmpeg (#4)
+- [x] Audio extraction with ffmpeg (#4)
 - [x] Transcription with faster-whisper and word timestamps (#5)
 - [x] Topic extraction with an LLM, local (Ollama) or hosted (Groq, Gemini, …): chunking, extraction, merging (#6–#9); see [docs/llm-providers.md](docs/llm-providers.md)
 - [x] Boundary refinement. Clips are **15–60 s** and **never longer than 60 s** (#10)
-- [ ] Clipping with ffmpeg (#11), output **vertical 9:16 at 1080×1920** by centre crop (#26)
-- [ ] Resumable orchestrator and the `echo-clips run` CLI (#12, #13)
-- [ ] End-to-end test and full README (#14, #15)
+- [x] Clipping with ffmpeg (#11), output **vertical 9:16 at 1080×1920** by centre crop (#26)
+- [ ] Resumable orchestrator and the `echo-clips run` CLI (#12, #13), in progress
+- [ ] End-to-end test and full README (#14, #15), in progress
 
 **Later**
 - [ ] Smart reframing that follows the speaker (#16)
-- [ ] Burned-in captions (#17)
+- [ ] Burned-in captions (#17): caption tracks are built (`captions.py`), not yet burned into clips
 - [ ] Clip scoring: keep only the most engaging moments (#21)
 - [ ] Speaker diarization (#22)
 - [ ] Web UI, job queue, S3 storage (#19, #20, #23)
@@ -54,14 +79,14 @@ Echo takes a long video, finds the best moments, cuts them into short vertical c
 |------------------|-----------------------------------------------------|
 | Language         | Python 3.12, managed with [uv](https://docs.astral.sh/uv/) |
 | Lint / tests     | ruff + pytest, run in GitHub Actions CI             |
-| Video processing | FFmpeg (via `ffmpeg-python` or subprocess)          |
+| Video processing | FFmpeg binaries called through `subprocess` (`echo.ffmpeg`) |
 | Transcription    | faster-whisper (local), word-level timestamps       |
 | Moment selection | An LLM behind a swappable `LLMClient`: local through [Ollama](https://ollama.com) or hosted through any OpenAI-compatible API (Groq by default for hosted). It returns segment IDs, never timestamps |
-| Reframing        | MediaPipe / OpenCV face detection                   |
+| Reframing        | Centre crop to 9:16 for now (position set by `--crop-x`; near-square sources are padded); speaker tracking with MediaPipe / OpenCV later (#16) |
 | Captions         | ASS subtitles burned in with FFmpeg                 |
 | Queue / jobs     | Start synchronous; move to Celery/RQ + Redis later  |
 | Storage          | Local disk first; S3-compatible later (needed for IG/FB, which pull video from a URL) |
-| Config           | `.env` + `config.yaml`                              |
+| Config           | CLI options → `PipelineConfig` (`echo.config`); API keys from environment variables; a config file later |
 
 ---
 
@@ -75,7 +100,8 @@ Echo/
 ├── src/echo/
 │   ├── models.py, interfaces.py, job.py, config.py, errors.py   # contracts (#3)
 │   ├── testing.py       # fakes for tests (FakeLLMClient, FakeTranscriber)
-│   ├── ingest.py        # input.mp4 → audio.wav (#4, to do)
+│   ├── ffmpeg.py        # ffmpeg/ffprobe subprocess helpers
+│   ├── ingest.py        # input.mp4 → audio.wav (#4)
 │   ├── transcribe.py    # audio.wav → transcript.json (#5)
 │   ├── llm/             # transcript.json → topics.json
 │   │   ├── chunking.py  #   overlapping windows (#6)
@@ -83,11 +109,13 @@ Echo/
 │   │   ├── prompts.py, topics.py   #   topic extraction (#8)
 │   │   └── merge.py     #   merge across windows + LLM stage (#9)
 │   ├── refine.py        # topics → clips.json, 15–60 s (#10)
-│   ├── clip.py          # clips/<nn>-<slug>.mp4 (#11, #26, to do)
-│   ├── pipeline.py      # orchestrator (#12, to do)
-│   └── cli.py           # echo-clips (#13, to do)
+│   ├── clip.py, reframe.py  # clips/<nn>-<slug>.mp4, 9:16 (#11, #26)
+│   ├── captions.py      # caption tracks (#17, not wired in yet)
+│   ├── pipeline.py      # orchestrator (#12, in progress)
+│   └── cli.py           # echo-clips (#13, in progress)
 ├── tests/               # incl. golden fixtures in tests/fixtures/golden/
 ├── docs/
+│   ├── cli.md           # echo-clips options
 │   ├── contracts.md     # layer contracts
 │   └── llm-providers.md # choosing a local or hosted LLM
 ├── .github/workflows/   # CI (lint, test on Linux + Windows, build) + release
@@ -116,33 +144,154 @@ Every platform needs its own developer app and OAuth credentials. Check each one
 
 ## Getting started
 
-Requirements: [uv](https://docs.astral.sh/uv/getting-started/installation/) and `ffmpeg` on your PATH, built **with libass** for burned-in captions (Ubuntu/Debian `apt install ffmpeg` and Windows `choco install ffmpeg` include it; Homebrew's default `ffmpeg` on macOS does not, so use a build with libass or set `caption.enabled = false`).
+### Prerequisites
+
+- **Python 3.12** and [uv](https://docs.astral.sh/uv/getting-started/installation/) (uv can install Python for you).
+- **ffmpeg** and `ffprobe` on your PATH, built **with libass** for burned-in captions: `sudo apt install ffmpeg` (Debian/Ubuntu) and `choco install ffmpeg` (Windows) include it. Homebrew's default `ffmpeg` (macOS) does not: use a build with libass, or turn captions off (`--no-captions` / `caption.enabled = false`).
+- **An LLM** for topic extraction. The default is local [Ollama](https://ollama.com):
+  ```bash
+  ollama pull llama3.2:3b
+  ```
+  Or a hosted provider (Groq, Gemini, OpenRouter, …) with an API key in the environment; see [docs/llm-providers.md](docs/llm-providers.md). Tests don't need either.
+
+The Whisper model (`small` by default) downloads on the first run.
+
+### Setup
 
 ```bash
 git clone https://github.com/YassineMessioui/Echo.git && cd Echo
 uv sync                 # creates .venv and installs deps (incl. dev)
-uv run pytest           # tests (real Whisper test: uv run pytest -m model)
-uv run ruff check .     # lint
-uv run ruff format .    # format
 ```
 
-Topic extraction needs an LLM: either a free hosted one (e.g. set `GROQ_API_KEY` from [console.groq.com/keys](https://console.groq.com/keys) and use `llm.provider = "groq"`) or a local one through [Ollama](https://ollama.com). See [docs/llm-providers.md](docs/llm-providers.md). Tests don't need either.
+### Usage
 
-Planned once the V0 pipeline exists (#13). The CLI is called `echo-clips` because `echo` clashes with the shell builtin:
+The CLI is called `echo-clips` because `echo` clashes with the shell builtin:
 
 ```bash
-uv run echo-clips run path/to/video.mp4 --max-duration 60 --aspect 9:16
+uv run echo-clips run episode.mp4                         # → jobs/<job_id>/clips/*.mp4
+uv run echo-clips run episode.mp4 --job-id ep42           # name the job; re-run to resume it
+uv run echo-clips run episode.mp4 --job-id ep42 --from-stage refine --max-duration 45
+uv run echo-clips run episode.mp4 --job-id ep42 --force   # redo every stage
+GROQ_API_KEY=... uv run echo-clips run episode.mp4 --llm-provider groq --llm-model openai/gpt-oss-120b
+uv run echo-clips run episode.mp4 --aspect source         # keep the original framing
 ```
 
-Output goes to `jobs/<job_id>/clips/<nn>-<slug>.mp4`. Runs can be resumed: use `--force` to redo every stage, or `--from-stage <name>` to redo one stage and everything after it.
-
-## Contributing
-
-Every change goes through a pull request on a branch. Ask the other owner to review it, and merge once they approve and the `lint` and `test` CI checks pass (on Linux and Windows).
+- Clips are **9:16 at 1080×1920** by default. `--aspect source` keeps the source framing; `--crop-x` moves the crop window (0 = left, 1 = right).
+- Re-running a job skips the stages that are done. `--force` redoes every stage; `--from-stage <name>` redoes that stage and everything after it (e.g. new duration limits only need `refine` and `clip`).
+- Every option and its default: [docs/cli.md](docs/cli.md).
 
 ---
 
-## Configuration (draft)
+## Job directory and data contracts
+
+Each run gets a directory, written only through `echo.job.Job` (atomic writes, validated reads):
+
+```
+jobs/<job_id>/
+├── input.mp4              # link to (or copy of) the source video
+├── audio.wav              # ingest: 16 kHz mono PCM
+├── transcript.json        # transcribe
+├── topics.json            # llm
+├── clips.json             # refine
+├── clips/
+│   ├── 01-<slug>.mp4      # clip, one per entry in clips.json
+│   └── manifest.json      # clip: fingerprints used to skip unchanged clips
+└── job.json               # orchestrator: stage status and models used
+```
+
+The JSON files are the Pydantic models in [`echo.models`](src/echo/models.py); layer rules are in [docs/contracts.md](docs/contracts.md). Times are in seconds.
+
+**`transcript.json`** (`Transcript`): segment ids run from 0 with no gaps; `language` is detected unless `--language` is set; `probability` may be `null`.
+
+```json
+{
+  "language": "en",
+  "duration": 80.5,
+  "segments": [
+    {
+      "id": 0,
+      "start": 0.0,
+      "end": 8.5,
+      "text": "Welcome back to the show, today we have a lot to cover.",
+      "words": [{ "start": 0.0, "end": 0.708, "text": "Welcome", "probability": 0.95 }]
+    }
+  ]
+}
+```
+
+**`topics.json`** (`list[Topic]`): inclusive segment spans.
+
+```json
+[
+  {
+    "title": "Sleep and productivity",
+    "summary": "How even small sleep losses hurt focus and reaction time.",
+    "start_segment": 4,
+    "end_segment": 7
+  }
+]
+```
+
+**`clips.json`** (`list[ClipSpec]`): `duration` is `end - start`, rounded to milliseconds.
+
+```json
+[{ "topic_title": "Sleep and productivity", "start": 34.0, "end": 80.2, "duration": 46.2 }]
+```
+
+**`job.json`** (`JobMeta`): `status` is `pending`, `running`, `done`, `skipped` or `failed`; `error` is set on failure.
+
+```json
+{
+  "job_id": "ep42",
+  "source": "/videos/episode.mp4",
+  "created_at": "2026-11-16T12:00:00Z",
+  "stages": {
+    "ingest": { "status": "done", "started_at": "2026-11-16T12:00:00Z", "finished_at": "2026-11-16T12:00:03Z", "error": null },
+    "transcribe": { "status": "done", "started_at": "2026-11-16T12:00:03Z", "finished_at": "2026-11-16T12:01:10Z", "error": null },
+    "llm": { "status": "failed", "started_at": "2026-11-16T12:01:10Z", "finished_at": "2026-11-16T12:01:11Z", "error": "..." },
+    "refine": { "status": "pending", "started_at": null, "finished_at": null, "error": null },
+    "clip": { "status": "pending", "started_at": null, "finished_at": null, "error": null }
+  },
+  "models": { "whisper": "faster-whisper/small" }
+}
+```
+
+**`clips/manifest.json`**: file name → hashes of its `ClipSpec` and `ClipConfig`. A clip is re-cut when either changes; files no longer in `clips.json` are deleted.
+
+```json
+{
+  "01-sleep-and-productivity.mp4": { "clip": "9c1e4f0a2b7d3e58", "config": "4a7b0c2d9e1f3a65" }
+}
+```
+
+---
+
+## Development
+
+```bash
+uv run ruff check .     # lint
+uv run ruff format .    # format (CI runs --check)
+uv run pytest           # tests; real-model tests are skipped by default
+uv run pytest -m model  # also run the real Whisper model (slow, downloads weights)
+```
+
+Tests marked `ffmpeg` use the real binaries and are skipped if ffmpeg isn't installed. Develop against the golden fixtures and fakes described in [docs/contracts.md](docs/contracts.md).
+
+**Pull requests:** every change goes through a PR to `main` from a branch. It can be merged once the required checks pass: `lint`, `test (ubuntu-latest)` and `test (windows-latest)`, with the branch up to date and review conversations resolved. Any collaborator can merge once green; ask the other owner for a review on anything non-trivial. Contract changes (`models.py`, `interfaces.py`, `job.py`, `errors.py`, `config.py`, golden fixtures) get their own PR.
+
+**Releasing:** bump `version` in `pyproject.toml`, then push a tag:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The release workflow runs the tests, builds the package and publishes a GitHub Release with the wheel and sdist attached.
+
+---
+
+## Configuration
+
+V0 is configured through `echo-clips` options, which map to `PipelineConfig` in [`echo.config`](src/echo/config.py); API keys come only from environment variables. A config file is planned for later (draft):
 
 ```yaml
 clips:

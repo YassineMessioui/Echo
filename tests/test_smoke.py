@@ -1,6 +1,7 @@
-import echo
+import typer
+
+import echo.cli
 
 
-def test_main_runs(capsys):
-    echo.main()
-    assert "echo" in capsys.readouterr().out
+def test_cli_app_is_importable():
+    assert isinstance(echo.cli.app, typer.Typer)
