@@ -42,6 +42,12 @@ class RefineConfig(_Section):
     min_duration: float = Field(default=15.0, gt=0)
     max_duration: float = Field(default=60.0, gt=0)
     padding: float = Field(default=0.2, ge=0)
+    max_clips: int | None = Field(default=None, ge=1)
+    """Keep at most this many clips (None = all). Until clip scoring (#21) exists, the
+    ones closest to ~37 s are kept, in chronological order."""
+    max_clips: int | None = Field(default=None, ge=1)
+    """Keep at most this many clips (None = all). Until clip scoring (#21) exists, the
+    ones closest to IDEAL_DURATION are kept, in chronological order."""
 
     @model_validator(mode="after")
     def _range(self) -> "RefineConfig":
