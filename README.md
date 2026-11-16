@@ -50,7 +50,8 @@ Echo takes a long video, finds the best moments, cuts them into short vertical c
 
 | Layer            | Choice (proposed)                                   |
 |------------------|-----------------------------------------------------|
-| Language         | Python 3.11+                                        |
+| Language         | Python 3.12, managed with [uv](https://docs.astral.sh/uv/) |
+| Lint / tests     | ruff + pytest, run in GitHub Actions CI             |
 | Video processing | FFmpeg (via `ffmpeg-python` or subprocess)          |
 | Transcription    | Whisper / faster-whisper (local) or a hosted STT API |
 | Moment selection | LLM over the timestamped transcript, plus heuristics |
@@ -65,8 +66,8 @@ Echo takes a long video, finds the best moments, cuts them into short vertical c
 ## Project layout (planned)
 
 ```
-echo/
-├── echo/
+Echo/
+├── src/echo/
 │   ├── ingest/        # download + normalize input
 │   ├── analyze/       # transcription, scene/audio signals
 │   ├── select/        # pick highlight segments
@@ -77,9 +78,11 @@ echo/
 │   │   ├── instagram.py
 │   │   └── facebook.py
 │   └── cli.py
+├── tests/
+├── .github/workflows/ # CI (lint, test, build) + release
 ├── config.example.yaml
 ├── .env.example
-├── tests/
+├── pyproject.toml
 └── README.md
 ```
 
@@ -100,20 +103,32 @@ Every platform needs its own developer app and OAuth credentials. Check each one
 
 ---
 
-## Getting started (planned)
+## Getting started
+
+Requirements: [uv](https://docs.astral.sh/uv/getting-started/installation/) and `ffmpeg` on your PATH.
 
 ```bash
-git clone <repo-url> echo && cd echo
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env            # add API keys / OAuth secrets
-cp config.example.yaml config.yaml
+git clone https://github.com/YassineMessioui/Echo.git && cd Echo
+uv sync                 # creates .venv and installs deps (incl. dev)
+uv run echo             # run the CLI
+uv run pytest           # tests
+uv run ruff check .     # lint
+uv run ruff format .    # format
+```
 
-# requires ffmpeg on PATH
-echo run path/to/video.mp4 --max-clips 5 --dry-run
+Planned once the pipeline exists:
+
+```bash
+cp .env.example .env              # add API keys / OAuth secrets
+cp config.example.yaml config.yaml
+uv run echo run path/to/video.mp4 --max-clips 5 --dry-run
 ```
 
 `--dry-run` renders the clips without uploading anything.
+
+## Contributing
+
+`main` is protected: every change goes through a pull request, and the `lint` and `test` CI checks must pass before merging.
 
 ---
 
