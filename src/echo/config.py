@@ -73,7 +73,9 @@ class CaptionConfig(_Section):
     """
 
     enabled: bool = True
-    font: str = "Arial"
+    font: str = "Montserrat ExtraBold"
+    """Bundled with Echo (echo/fonts, SIL OFL), so captions look the same everywhere;
+    any installed system font name works too."""
     font_size: int = Field(default=84, gt=0)
     colour: HexColour = "#FFFFFF"
     highlight_colour: HexColour = "#FFD400"

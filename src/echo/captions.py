@@ -22,12 +22,16 @@ from pathlib import Path
 from echo.models import ClipSpec, Transcript, Word
 
 PLAY_RES = (1080, 1920)
+
+FONTS_DIR = Path(__file__).parent / "fonts"
+"""Fonts shipped with Echo (Montserrat ExtraBold, SIL Open Font License; see OFL.txt).
+libass looks here first, so captions render the same on every machine (#64)."""
 """Caption coordinates are laid out for the 9:16 output; libass scales them otherwise."""
 
 
 @dataclass(frozen=True)
 class CaptionStyle:
-    font: str = "Arial"
+    font: str = "Montserrat ExtraBold"
     font_size: int = 84
     colour: str = "#FFFFFF"
     highlight_colour: str = "#FFD400"
@@ -207,10 +211,16 @@ def _escape_graph(value: str) -> str:
     return value
 
 
-def subtitles_filter(ass_path: Path) -> str:
+def subtitles_filter(ass_path: Path, fonts_dir: Path | None = FONTS_DIR) -> str:
     """``subtitles`` filter for ``-vf`` burning ``ass_path`` in; safe for Windows paths
-    (``C:\\...``) and names with spaces, quotes, commas or brackets."""
-    return "subtitles=filename=" + _escape_graph(_escape_option(ass_path.as_posix()))
+    (``C:\\...``) and names with spaces, quotes, commas or brackets.
+
+    ``fonts_dir`` (the bundled fonts by default) is searched before system fonts.
+    """
+    value = "filename=" + _escape_option(ass_path.as_posix())
+    if fonts_dir is not None:
+        value += ":fontsdir=" + _escape_option(fonts_dir.as_posix())
+    return "subtitles=" + _escape_graph(value)
 
 
 def chain_filters(*filters: str | None) -> str | None:
