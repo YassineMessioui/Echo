@@ -18,7 +18,14 @@ import typer
 from pydantic import ValidationError
 
 from echo.clip import clip_paths
-from echo.config import ClipConfig, LLMConfig, PipelineConfig, RefineConfig, TranscribeConfig
+from echo.config import (
+    CaptionConfig,
+    ClipConfig,
+    LLMConfig,
+    PipelineConfig,
+    RefineConfig,
+    TranscribeConfig,
+)
 from echo.errors import EchoError
 from echo.job import Job
 from echo.models import StageName, StageStatus
@@ -82,6 +89,7 @@ def _build_config(
     llm: dict[str, Any],
     refine: dict[str, Any],
     clip: dict[str, Any],
+    caption: dict[str, Any],
 ) -> PipelineConfig:
     """Overlay the CLI values on the defaults, validating every section.
 
@@ -99,6 +107,7 @@ def _build_config(
                 "llm": LLMConfig.model_validate(_D.llm.model_dump() | llm),
                 "refine": RefineConfig.model_validate(_D.refine.model_dump() | refine),
                 "clip": ClipConfig.model_validate(_D.clip.model_dump() | clip),
+                "caption": CaptionConfig.model_validate(_D.caption.model_dump() | caption),
             }
         )
     except ValidationError as e:
@@ -164,6 +173,9 @@ def run(
     background: Annotated[
         Background, typer.Option(help="Fill for sources narrower than 9:16.")
     ] = _DEFAULT_BACKGROUND,
+    captions: Annotated[
+        bool, typer.Option("--captions/--no-captions", help="Burn word-highlighted captions in.")
+    ] = _D.caption.enabled,
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Debug logging and full tracebacks.")
     ] = False,
@@ -178,6 +190,7 @@ def run(
         llm={"provider": llm_provider, "model": llm_model},
         refine={"min_duration": min_duration, "max_duration": max_duration},
         clip={"aspect": aspect.value, "crop_x": crop_x, "background": background.value},
+        caption={"enabled": captions},
     )
 
     def on_event(event: StageEvent) -> None:
@@ -200,6 +213,10 @@ def run(
             typer.echo(traceback.format_exc(), err=True, nl=False)
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from e
+    except KeyboardInterrupt:
+        # run_pipeline has already recorded the stage as failed ("interrupted").
+        typer.echo("interrupted", err=True)
+        raise typer.Exit(130) from None
 
     typer.echo(f"job: {job.root}")
     if paths:

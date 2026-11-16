@@ -100,10 +100,27 @@ def test_help_lists_every_option():
         "--aspect",
         "--crop-x",
         "--background",
+        "--captions",
+        "--no-captions",
         "--verbose",
         "-v",
     ]:
         assert option in result.stdout, option
+
+
+def test_no_captions(fake, video, jobs_dir):
+    result = run(video, jobs_dir, "--no-captions")
+    assert result.exit_code == 0, result.output
+    assert fake.config.caption.enabled is False
+    assert run(video, jobs_dir).exit_code == 0
+    assert fake.config.caption.enabled is True
+
+
+def test_ctrl_c_exits_130(fake, video, jobs_dir):
+    fake.error = KeyboardInterrupt()
+    result = run(video, jobs_dir)
+    assert result.exit_code == 130
+    assert "interrupted" in result.output
 
 
 def test_version():
