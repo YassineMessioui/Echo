@@ -55,29 +55,38 @@ def _fit(width: int, height: int) -> tuple[int, int]:
     return _even(width * scale), _even(height * scale)
 
 
-def video_filter(width: int, height: int, config: ClipConfig) -> str | None:
+def video_filter(width: int, height: int, config: ClipConfig, *, sar: float = 1.0) -> str | None:
     """ffmpeg ``-vf`` filter that frames a ``width`` x ``height`` source as 1080x1920,
-    or None when ``config.aspect == "source"`` (keep the original framing)."""
+    or None when ``config.aspect == "source"`` (keep the original framing).
+
+    ``width``/``height``/``sar`` describe the frames the filter receives, i.e. after
+    ffmpeg's auto-rotation (``MediaInfo.frame_size`` / ``frame_sar``). Non-square pixels
+    are first resampled to square ones so the framing uses the displayed shape.
+    """
     if config.aspect == "source":
         return None
-    if width <= 0 or height <= 0:
-        raise ValueError(f"invalid video size {width}x{height}")
+    if width <= 0 or height <= 0 or sar <= 0:
+        raise ValueError(f"invalid video size {width}x{height} (sar {sar})")
+    prefix = ""
+    if abs(sar - 1) > ASPECT_TOLERANCE:
+        width, height = _even(width * sar), _even(height)
+        prefix = f"scale={width}:{height},setsar=1,"
     out_w, out_h = TARGET
     scale = f"scale={out_w}:{out_h}"
     aspect = width / height
 
     if abs(aspect - VERTICAL) <= ASPECT_TOLERANCE * VERTICAL:
-        return f"{scale},setsar=1"
+        return f"{prefix}{scale},setsar=1"
     if aspect >= CROP_MIN_ASPECT * (1 - ASPECT_TOLERANCE):
-        return f"{_crop(width, height, config.crop_x)},{scale},setsar=1"
+        return f"{prefix}{_crop(width, height, config.crop_x)},{scale},setsar=1"
 
     fit_w, fit_h = _fit(width, height)
     x, y = (out_w - fit_w) // 2, (out_h - fit_h) // 2
     if config.background == "black":
-        return f"scale={fit_w}:{fit_h},pad={out_w}:{out_h}:{x}:{y}:black,setsar=1"
+        return f"{prefix}scale={fit_w}:{fit_h},pad={out_w}:{out_h}:{x}:{y}:black,setsar=1"
     blur_w, blur_h = BLUR_SIZE
     return (
-        "split=2[bg][fg];"
+        f"{prefix}split=2[bg][fg];"
         f"[bg]scale={blur_w}:{blur_h}:force_original_aspect_ratio=increase,"
         f"crop={blur_w}:{blur_h},boxblur=10:2,{scale},setsar=1[back];"
         f"[fg]scale={fit_w}:{fit_h},setsar=1[front];"
@@ -90,6 +99,7 @@ def video_filter_for(path: Path, config: ClipConfig) -> str | None:
     if config.aspect == "source":
         return None
     info = probe(path)
-    if not info.has_video or not info.width or not info.height:
+    size = info.frame_size
+    if not info.has_video or not size or not all(size):
         raise InvalidInputError(f"no video stream: {path}")
-    return video_filter(info.width, info.height, config)
+    return video_filter(*size, config, sar=info.frame_sar)

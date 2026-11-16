@@ -1,8 +1,8 @@
 import pytest
 
 from echo.config import ClipConfig
-from echo.errors import InvalidInputError
-from echo.ffmpeg import ffmpeg, probe
+from echo.errors import ExternalToolError, InvalidInputError
+from echo.ffmpeg import MediaInfo, ffmpeg, probe
 from echo.reframe import TARGET, video_filter, video_filter_for
 
 BLUR_1080 = (
@@ -94,3 +94,76 @@ def test_video_filter_for_rejects_audio_only(tmp_path):
     ffmpeg(["-f", "lavfi", "-i", "sine=duration=0.5", str(wav)])
     with pytest.raises(InvalidInputError, match="no video stream"):
         video_filter_for(wav, ClipConfig())
+
+
+def test_non_square_pixels_are_resampled_first():
+    # 480x480 stored with 16:9 pixels displays as 16:9: crop, not pad.
+    vf = video_filter(480, 480, ClipConfig(), sar=16 / 9)
+    assert vf is not None
+    assert vf.startswith("scale=852:480,setsar=1,crop=")
+
+
+@pytest.mark.parametrize(
+    ("rotation", "sar", "frame_size", "frame_sar"),
+    [(0, 1.0, (1920, 1080), 1.0), (90, 1.0, (1080, 1920), 1.0), (270, 2.0, (1080, 1920), 0.5)],
+)
+def test_media_info_frame_size(rotation, sar, frame_size, frame_sar):
+    info = MediaInfo(
+        duration=1,
+        has_audio=False,
+        has_video=True,
+        width=1920,
+        height=1080,
+        rotation=rotation,
+        sample_aspect_ratio=sar,
+    )
+    assert info.frame_size == frame_size
+    assert info.frame_sar == frame_sar
+
+
+def _rotated(src, out, degrees):
+    """Remux ``src`` with a display rotation, as phones store portrait video."""
+    try:
+        ffmpeg(["-display_rotation", str(degrees), "-i", str(src), "-c", "copy", str(out)])
+    except ExternalToolError:  # ffmpeg < 6 has no -display_rotation
+        ffmpeg(["-i", str(src), "-c", "copy", "-metadata:s:v", f"rotate={degrees}", str(out)])
+    return out
+
+
+@pytest.mark.ffmpeg
+def test_rotated_phone_video_is_not_cropped(make_video, tmp_path):
+    # Stored 320x180 + 90° rotation = an upright 180x320 (9:16) picture.
+    src = _rotated(make_video(duration=1.0, size="320x180"), tmp_path / "phone.mp4", 90)
+    info = probe(src)
+    assert info.rotation in (90, 270)
+    assert info.frame_size == (180, 320)
+    vf = video_filter_for(src, ClipConfig())
+    assert vf == "scale=1080:1920,setsar=1"
+    out = tmp_path / "out.mp4"
+    ffmpeg(["-i", str(src), "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", str(out)])
+    assert (probe(out).width, probe(out).height) == TARGET
+
+
+@pytest.mark.ffmpeg
+def test_anamorphic_source(make_video, tmp_path):
+    src = tmp_path / "anamorphic.mp4"
+    square = make_video(duration=1.0, size="240x240")
+    ffmpeg(
+        [
+            "-i",
+            str(square),
+            "-vf",
+            "setsar=16/9",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            str(src),
+        ]
+    )
+    assert probe(src).sample_aspect_ratio == pytest.approx(16 / 9, rel=0.01)
+    vf = video_filter_for(src, ClipConfig())
+    assert vf is not None and "crop=" in vf
+    out = tmp_path / "out.mp4"
+    ffmpeg(["-i", str(src), "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", str(out)])
+    assert (probe(out).width, probe(out).height) == TARGET

@@ -73,6 +73,46 @@ class MediaInfo:
     height: int | None = None
     sample_rate: int | None = None
     channels: int | None = None
+    rotation: int = 0
+    """Display rotation in degrees (0, 90, 180, 270); phones store portrait video this way."""
+    sample_aspect_ratio: float = 1.0
+    """Pixel shape (SAR); not 1 for anamorphic sources."""
+
+    @property
+    def frame_size(self) -> tuple[int, int] | None:
+        """(width, height) of the frames a ``-vf`` filter receives.
+
+        ffmpeg auto-rotates before user filters, so ±90° rotations swap the stored size.
+        """
+        if self.width is None or self.height is None:
+            return None
+        if self.rotation in (90, 270):
+            return self.height, self.width
+        return self.width, self.height
+
+    @property
+    def frame_sar(self) -> float:
+        """Sample aspect ratio of the frames a ``-vf`` filter receives (inverted by ±90°)."""
+        return (
+            1 / self.sample_aspect_ratio if self.rotation in (90, 270) else self.sample_aspect_ratio
+        )
+
+
+def _rotation(stream: dict) -> int:
+    """Rotation from the display matrix side data, falling back to the legacy ``rotate`` tag."""
+    for side in stream.get("side_data_list", []):
+        if "rotation" in side:
+            return round(float(side["rotation"])) % 360
+    return round(float(stream.get("tags", {}).get("rotate", 0))) % 360
+
+
+def _sar(stream: dict) -> float:
+    num, _, den = str(stream.get("sample_aspect_ratio", "1:1")).partition(":")
+    try:
+        sar = int(num) / int(den)
+    except (ValueError, ZeroDivisionError):
+        return 1.0
+    return sar if sar > 0 else 1.0  # "0:1" means unknown
 
 
 def probe(path: Path) -> MediaInfo:
@@ -108,4 +148,6 @@ def probe(path: Path) -> MediaInfo:
         height=int(video["height"]) if video else None,
         sample_rate=int(audio["sample_rate"]) if audio else None,
         channels=int(audio["channels"]) if audio else None,
+        rotation=_rotation(video) if video else 0,
+        sample_aspect_ratio=_sar(video) if video else 1.0,
     )
