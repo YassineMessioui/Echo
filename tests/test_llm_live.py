@@ -10,10 +10,12 @@ import json
 import os
 
 import pytest
+from dotenv import find_dotenv, load_dotenv
 
 from echo.config import LLMConfig
 from echo.llm.client import make_llm_client
 
+load_dotenv(find_dotenv(usecwd=True), override=False)  # keys from a local .env
 PROVIDER = os.environ.get("ECHO_LIVE_LLM")
 
 pytestmark = pytest.mark.skipif(not PROVIDER, reason="set ECHO_LIVE_LLM=<provider> to run")
