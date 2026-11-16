@@ -7,7 +7,7 @@ or on a **hosted API**. Pick one with `llm.provider` in `PipelineConfig`
 | `llm.provider` | Where it runs | API key variable | Default model |
 |---|---|---|---|
 | `ollama` (default) | your machine, `llm.host` (default `http://localhost:11434`) | – | `llama3.2:3b` |
-| `groq` | [Groq](https://console.groq.com/keys) | `GROQ_API_KEY` | `llama-3.3-70b-versatile` |
+| `groq` | [Groq](https://console.groq.com/keys) | `GROQ_API_KEY` | `openai/gpt-oss-120b` |
 | `openrouter` | [OpenRouter](https://openrouter.ai/settings/keys) | `OPENROUTER_API_KEY` | `meta-llama/llama-3.3-70b-instruct:free` |
 | `gemini` | [Google AI Studio](https://aistudio.google.com/apikey) | `GEMINI_API_KEY` | `gemini-2.5-flash` |
 | `mistral` | [Mistral](https://console.mistral.ai/api-keys) | `MISTRAL_API_KEY` | `mistral-small-latest` |

@@ -39,7 +39,7 @@ def _client(handler, config: LLMConfig | None = None, env: dict | None = None):
 def test_preset_defaults_replace_ollama_defaults():
     client, seen = _client(lambda r: _ok("hi"))
     assert isinstance(client, LLMClient)
-    assert client.model_name == "groq/llama-3.3-70b-versatile"
+    assert client.model_name == "groq/openai/gpt-oss-120b"
     client.complete("s", "p")
     assert str(seen[0].url) == "https://api.groq.com/openai/v1/chat/completions"
     assert seen[0].headers["authorization"] == "Bearer gsk-test"
@@ -136,7 +136,7 @@ def test_falls_back_when_json_mode_is_unsupported():
         ),
         (
             httpx.Response(404, json={"error": {"message": "model does not exist"}}),
-            "no model 'llama-3.3-70b-versatile'.*Set llm.model",
+            "no model 'openai/gpt-oss-120b'.*Set llm.model",
         ),
         (
             httpx.Response(429, headers={"retry-after": "7"}, json={"error": {"message": "slow"}}),
