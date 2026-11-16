@@ -7,6 +7,13 @@ options and calls `echo.pipeline.run_pipeline(job, build_stages(config), config,
 echo-clips run VIDEO [OPTIONS]
 ```
 
+`VIDEO` is a local file or an `http(s)://` link (YouTube, Vimeo, …). A link is
+downloaded with [yt-dlp](https://github.com/yt-dlp/yt-dlp) into the job folder (best
+video up to 1080p + audio, merged to MP4). Without `--job-id`, the job is named after
+the site and video id (e.g. `youtube-jNQXAC9IVRw`), so running the same link again
+resumes that job instead of downloading it again. YouTube needs a JavaScript runtime
+(deno, node or bun on `PATH`). Only clip content you have the rights to use.
+
 | Option | Default | Maps to |
 |---|---|---|
 | `--job-id TEXT` | random 12-char hex | `Job.create(..., job_id=)`; reusing an id resumes that job |
@@ -55,6 +62,7 @@ error message (no traceback unless `--verbose`).
 
 ```bash
 echo-clips run episode.mp4
+echo-clips run "https://www.youtube.com/watch?v=VIDEO_ID" --llm-provider gemini
 echo-clips run episode.mp4 --job-id ep42 --from-stage refine --max-duration 45
 echo-clips run episode.mp4 --llm-provider groq --llm-model openai/gpt-oss-120b
 echo-clips run episode.mp4 --aspect source

@@ -27,6 +27,7 @@ from echo.config import (
     RefineConfig,
     TranscribeConfig,
 )
+from echo.download import is_url, job_from_url
 from echo.errors import EchoError
 from echo.job import Job
 from echo.models import StageName, StageStatus
@@ -133,9 +134,30 @@ def _progress_line(event: StageEvent, total: int) -> str:
     return f"[{index}/{total}] {event.stage.value:<11} {event.status.value:<9} {elapsed}".rstrip()
 
 
+class _DownloadProgress:
+    """Prints ``[download]  40%`` lines in 20% steps (per stream: video, then audio)."""
+
+    def __init__(self) -> None:
+        self._last = -1
+
+    def __call__(self, fraction: float) -> None:
+        step = int(fraction * 100) // 20 * 20
+        if step < self._last:  # a new stream started
+            self._last = -1
+        if step > self._last:
+            self._last = step
+            typer.echo(f"[download] {step:3d}%")
+
+
 @app.command()
 def run(
-    video: Annotated[Path, typer.Argument(help="The source video.", show_default=False)],
+    video: Annotated[
+        str,
+        typer.Argument(
+            help="The source video: a local file, or a link (YouTube etc.) to download.",
+            show_default=False,
+        ),
+    ],
     job_id: Annotated[
         str | None,
         typer.Option(
@@ -202,7 +224,12 @@ def run(
             typer.echo(_progress_line(event, len(_STAGES)))
 
     try:
-        job = Job.create(config.jobs_dir, video, job_id=job_id)
+        if is_url(video):
+            job = job_from_url(
+                config.jobs_dir, video, job_id=job_id, on_progress=_DownloadProgress()
+            )
+        else:
+            job = Job.create(config.jobs_dir, Path(video), job_id=job_id)
         run_pipeline(
             job,
             build_stages(config),
