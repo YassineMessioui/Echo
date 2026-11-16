@@ -5,6 +5,9 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "faster-whisper>=1.2.1",
+    "httpx>=0.28.1",
+    "numpy>=2.5.5",
     "pydantic>=2.14.3",
 ]
 
@@ -30,4 +33,7 @@ select = ["E", "F", "W", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -m 'not model'"
+markers = [
+    "model: runs a real ML model (slow, downloads weights); opt in with `pytest -m model`",
+]
