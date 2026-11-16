@@ -11,6 +11,8 @@ class _Section(BaseModel):
 
 
 class IngestConfig(_Section):
+    # The transcribe stage only accepts 16 kHz mono 16-bit PCM (``transcribe.load_wav``);
+    # other values only make sense once another speech model needs them.
     sample_rate: int = 16_000
     channels: int = 1
 
