@@ -236,3 +236,13 @@ def test_caption_config_defaults_and_validation():
     for bad in ({"colour": "yellow"}, {"highlight_colour": "#FFF"}, {"max_words": 0}):
         with pytest.raises(ValidationError):
             CaptionConfig(**bad)
+
+
+def test_refine_max_clips_and_caption_font_defaults():
+    from echo.config import CaptionConfig
+
+    assert RefineConfig().max_clips is None
+    assert RefineConfig(max_clips=3).max_clips == 3
+    with pytest.raises(ValidationError):
+        RefineConfig(max_clips=0)
+    assert CaptionConfig().font == "Montserrat ExtraBold"
