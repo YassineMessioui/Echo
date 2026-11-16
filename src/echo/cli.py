@@ -187,6 +187,10 @@ def run(
     max_duration: Annotated[
         float, typer.Option(help="Longest clip, in seconds (60 is the platform cap).")
     ] = _D.refine.max_duration,
+    max_clips: Annotated[
+        int | None,
+        typer.Option(min=1, help="Keep at most this many clips (those closest to ~37 s)."),
+    ] = _D.refine.max_clips,
     aspect: Annotated[
         Aspect, typer.Option(help="Output framing: 9:16 vertical, or keep the source framing.")
     ] = _DEFAULT_ASPECT,
@@ -211,7 +215,11 @@ def run(
         jobs_dir=jobs_dir,
         transcribe={"model_size": whisper_model, "language": language},
         llm={"provider": llm_provider, "model": llm_model},
-        refine={"min_duration": min_duration, "max_duration": max_duration},
+        refine={
+            "min_duration": min_duration,
+            "max_duration": max_duration,
+            "max_clips": max_clips,
+        },
         clip={"aspect": aspect.value, "crop_x": crop_x, "background": background.value},
         caption={"enabled": captions},
     )

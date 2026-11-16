@@ -51,6 +51,13 @@ class FakePipeline:
         return self.calls[-1]["config"]
 
 
+@pytest.fixture(autouse=True)
+def _libass_available(monkeypatch):
+    """CLI tests don't depend on the local ffmpeg build (e.g. Homebrew without libass);
+    the missing-libass path is tested explicitly below."""
+    monkeypatch.setattr(cli, "has_filter", lambda name: True)
+
+
 @pytest.fixture
 def fake(monkeypatch) -> FakePipeline:
     fake = FakePipeline()
@@ -97,6 +104,7 @@ def test_help_lists_every_option():
         "--llm-model",
         "--min-duration",
         "--max-duration",
+        "--max-clips",
         "--aspect",
         "--crop-x",
         "--background",
@@ -152,6 +160,7 @@ def test_options_map_to_config_fields(fake, video, jobs_dir):
         "--llm-model", "openai/gpt-oss-120b",
         "--min-duration", "20",
         "--max-duration", "45",
+        "--max-clips", "3",
         "--aspect", "source",
         "--crop-x", "0.25",
         "--background", "black",
@@ -162,6 +171,7 @@ def test_options_map_to_config_fields(fake, video, jobs_dir):
     assert (c.transcribe.model_size, c.transcribe.language) == ("medium", "fr")
     assert (c.llm.provider, c.llm.model) == ("groq", "openai/gpt-oss-120b")
     assert (c.refine.min_duration, c.refine.max_duration) == (20.0, 45.0)
+    assert c.refine.max_clips == 3
     assert (c.clip.aspect, c.clip.crop_x, c.clip.background) == ("source", 0.25, "black")
     # untouched fields keep their defaults
     defaults = PipelineConfig()
@@ -338,3 +348,9 @@ def test_libass_check_skipped_when_ffmpeg_is_missing(fake, video, jobs_dir, monk
 
     monkeypatch.setattr(cli, "has_filter", no_ffmpeg)
     assert run(video, jobs_dir).exit_code == 0  # left to the ingest stage to report
+
+
+def test_max_clips_defaults_to_all_and_rejects_zero(fake, video, jobs_dir):
+    assert run(video, jobs_dir).exit_code == 0
+    assert fake.config.refine.max_clips is None
+    assert run(video, jobs_dir, "--max-clips", "0").exit_code == 2
