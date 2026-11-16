@@ -34,7 +34,7 @@ Echo takes a long video, finds the best moments, cuts them into short vertical c
 - [ ] Transcription with faster-whisper and word timestamps (#5)
 - [ ] Topic extraction with a local LLM through Ollama: chunking, extraction, merging (#6–#9)
 - [ ] Boundary refinement. Clips are **15–60 s** and **never longer than 60 s** (#10)
-- [ ] Clipping with ffmpeg (#11), output **vertical 9:16 at 1080×1920** by centre crop
+- [ ] Clipping with ffmpeg (#11), output **vertical 9:16 at 1080×1920** by centre crop (#26)
 - [ ] Resumable orchestrator and the `echo-clips run` CLI (#12, #13)
 - [ ] End-to-end test and full README (#14, #15)
 
