@@ -2,7 +2,7 @@
 
 Echo takes a long video, finds the best moments, cuts them into short vertical clips (60 seconds max), and posts them to **TikTok, YouTube Shorts, Instagram Reels and Facebook Reels** automatically.
 
-> **Status:** early planning. This README describes what we intend to build. The stack below is a proposal and can change.
+> **Status:** V0 in progress. The data contracts are in place and the pipeline stages are being built in parallel. The stack below can still change.
 
 ---
 
@@ -29,7 +29,7 @@ Echo takes a long video, finds the best moments, cuts them into short vertical c
 ## Roadmap
 
 **V0: video → vertical topic clips** ([milestone](https://github.com/YassineMessioui/Echo/milestone/1))
-- [ ] Data contracts and per-run job directory (#3)
+- [x] Data contracts and per-run job directory (#3)
 - [ ] Audio extraction with ffmpeg (#4)
 - [ ] Transcription with faster-whisper and word timestamps (#5)
 - [ ] Topic extraction with a local LLM through Ollama: chunking, extraction, merging (#6–#9)
@@ -65,28 +65,35 @@ Echo takes a long video, finds the best moments, cuts them into short vertical c
 
 ---
 
-## Project layout (planned)
+## Project layout
+
+One module per pipeline stage. Each implements an interface from `echo.interfaces` and
+reads/writes artifacts only through `echo.job.Job`; see [docs/contracts.md](docs/contracts.md).
 
 ```
 Echo/
 ├── src/echo/
-│   ├── ingest/        # download + normalize input
-│   ├── analyze/       # transcription, scene/audio signals
-│   ├── select/        # pick highlight segments
-│   ├── render/        # cut, reframe, captions
-│   ├── publish/       # one module per platform
-│   │   ├── youtube.py
-│   │   ├── tiktok.py
-│   │   ├── instagram.py
-│   │   └── facebook.py
-│   └── cli.py
-├── tests/
-├── .github/workflows/ # CI (lint, test, build) + release
-├── config.example.yaml
-├── .env.example
+│   ├── models.py, interfaces.py, job.py, config.py, errors.py   # contracts (#3)
+│   ├── testing.py       # fakes for tests (FakeLLMClient, FakeTranscriber)
+│   ├── ingest.py        # input.mp4 → audio.wav (#4)
+│   ├── transcribe.py    # audio.wav → transcript.json (#5)
+│   ├── llm/             # transcript.json → topics.json
+│   │   ├── chunking.py  #   overlapping windows (#6)
+│   │   ├── client.py    #   Ollama client (#7)
+│   │   ├── prompts.py, topics.py   #   topic extraction (#8)
+│   │   └── merge.py     #   merge across windows + LLM stage (#9)
+│   ├── refine.py        # topics → clips.json, 15–60 s (#10)
+│   ├── clip.py          # clips/<nn>-<slug>.mp4 (#11, #26)
+│   ├── pipeline.py      # orchestrator (#12)
+│   └── cli.py           # echo-clips (#13)
+├── tests/               # incl. golden fixtures in tests/fixtures/golden/
+├── docs/contracts.md
+├── .github/workflows/   # CI (lint, test on Linux + Windows, build) + release
 ├── pyproject.toml
 └── README.md
 ```
+
+Later (not V0): `publish/` with one module per platform.
 
 ---
 
@@ -112,7 +119,7 @@ Requirements: [uv](https://docs.astral.sh/uv/getting-started/installation/) and 
 ```bash
 git clone https://github.com/YassineMessioui/Echo.git && cd Echo
 uv sync                 # creates .venv and installs deps (incl. dev)
-uv run pytest           # tests
+uv run pytest           # tests (real-model tests: uv run pytest -m model)
 uv run ruff check .     # lint
 uv run ruff format .    # format
 ```
