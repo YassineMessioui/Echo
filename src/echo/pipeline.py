@@ -13,9 +13,11 @@ Behaviour of ``run_pipeline``:
   dataclass field (``ClipStage``) is run with ``force=True``.
 - ``job.json`` is updated around every stage: ``running`` with ``started_at``, then
   ``done`` / ``skipped`` / ``failed`` with ``finished_at`` and ``error``.
-- An ``EchoError`` from a stage marks it ``failed``, stops the run (later stages stay
-  as they were) and is re-raised as ``PipelineError``. Other exceptions are bugs: the
-  stage is still marked ``failed`` in ``job.json``, then the exception propagates.
+- An ``EchoError`` from a stage (from ``run()`` or ``outputs()``) marks it ``failed``,
+  stops the run (later stages stay as they were) and is re-raised as ``PipelineError``.
+  Any other exception, including ``KeyboardInterrupt``, is still recorded as ``failed``
+  in ``job.json`` (``error="interrupted"`` for Ctrl+C, ``"<Type>: <message>"`` for bugs)
+  and then propagates, so no stage is left ``running``.
 - Re-running after a failure resumes at the failed stage, because the completed stages'
   outputs exist.
 """
@@ -36,9 +38,9 @@ from echo.models import JobMeta, StageName, StageStatus
 class StageEvent:
     """Progress notification sent to ``run_pipeline``'s ``on_event`` callback.
 
-    ``status`` is ``RUNNING`` when a stage starts, then exactly one of ``DONE``,
-    ``SKIPPED`` or ``FAILED``. ``elapsed`` (seconds) is set on ``DONE`` / ``FAILED``,
-    ``error`` on ``FAILED``.
+    A stage that runs sends ``RUNNING`` then ``DONE`` or ``FAILED``. A skipped stage
+    sends only ``SKIPPED``, and one whose ``outputs()`` fails sends only ``FAILED``.
+    ``elapsed`` (seconds) is set on ``DONE`` / ``FAILED``, ``error`` on ``FAILED``.
     """
 
     stage: StageName

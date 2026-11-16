@@ -22,9 +22,12 @@ echo-clips run VIDEO [OPTIONS]
 | `--aspect [9:16\|source]` | `9:16` | `ClipConfig.aspect` |
 | `--crop-x FLOAT` | `0.5` | `ClipConfig.crop_x` (0 = left, 1 = right) |
 | `--background [blur\|black]` | `blur` | `ClipConfig.background` |
+| `--captions / --no-captions` | on | `CaptionConfig.enabled` (burned-in, word-highlighted) |
 | `-v, --verbose` | off | debug logging |
 
-Option defaults come from `PipelineConfig`, so the two can't drift.
+Option defaults come from `PipelineConfig`, so the two can't drift. Hosted LLM providers
+read their API key from the environment (e.g. `GROQ_API_KEY`); see
+[llm-providers.md](llm-providers.md).
 
 ## Output
 
@@ -46,6 +49,7 @@ error message (no traceback unless `--verbose`).
 | 0 | all stages done or skipped |
 | 1 | a stage failed (`PipelineError`) or the input is invalid (`EchoError`) |
 | 2 | bad usage (Typer/Click default) |
+| 130 | interrupted with Ctrl+C (the stage is recorded as `failed`, `error="interrupted"`) |
 
 ## Examples
 
