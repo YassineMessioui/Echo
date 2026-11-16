@@ -1,5 +1,6 @@
 """``echo-clips`` CLI. ``run_pipeline`` and ``build_stages`` are faked, so no stage runs."""
 
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -361,6 +362,28 @@ def test_url_download_error_exits_1(fake, jobs_dir, monkeypatch):
     assert result.exit_code == 1
     assert "Private video" in result.output
     assert fake.calls == []
+
+
+def _clear_quiet_env(monkeypatch):
+    # setenv first so monkeypatch restores (removes) them afterwards even if unset now.
+    for name in cli.QUIET_ENV:
+        monkeypatch.setenv(name, "placeholder")
+        monkeypatch.delenv(name)
+
+
+def test_quiet_model_libraries_by_default(fake, video, jobs_dir, monkeypatch):
+    _clear_quiet_env(monkeypatch)
+    monkeypatch.setenv("CT2_VERBOSE", "2")  # the user's own setting wins
+    assert run(video, jobs_dir).exit_code == 0
+    assert os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] == "1"
+    assert os.environ["HF_HUB_VERBOSITY"] == "error"
+    assert os.environ["CT2_VERBOSE"] == "2"
+
+
+def test_verbose_leaves_model_libraries_alone(fake, video, jobs_dir, monkeypatch):
+    _clear_quiet_env(monkeypatch)
+    assert run(video, jobs_dir, "--verbose").exit_code == 0
+    assert not any(name in os.environ for name in cli.QUIET_ENV)
 
 
 def test_missing_libass_fails_before_running_any_stage(fake, video, jobs_dir, monkeypatch):

@@ -34,9 +34,33 @@ class _WhisperLike(Protocol):
 ModelFactory = Callable[[TranscribeConfig], _WhisperLike]
 
 
+# Approximate download sizes, for the one-line first-run notice.
+_MODEL_SIZES = {"tiny": "75 MB", "base": "145 MB", "small": "480 MB", "medium": "1.5 GB"}
+
+
+def _announce_download(model_size: str) -> None:
+    """Log one clear line when the model isn't in the local cache yet (#65).
+
+    Only for the real "not cached" case: an invalid model name or a local directory
+    says nothing here and is handled by ``WhisperModel`` itself.
+    """
+    from faster_whisper.utils import download_model
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    try:
+        download_model(model_size, local_files_only=True)
+    except LocalEntryNotFoundError:
+        size = _MODEL_SIZES.get(model_size)
+        detail = f" (~{size}, first run only)" if size else " (first run only)"
+        logger.warning('downloading whisper model "%s"%s', model_size, detail)
+    except Exception:
+        pass
+
+
 def _load_whisper(config: TranscribeConfig) -> WhisperModel:
     from faster_whisper import WhisperModel  # heavy import, only when actually transcribing
 
+    _announce_download(config.model_size)
     return WhisperModel(config.model_size, device=config.device, compute_type=config.compute_type)
 
 

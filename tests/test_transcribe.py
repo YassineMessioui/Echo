@@ -242,6 +242,38 @@ def test_real_whisper_model(tmp_path: Path):
         assert any(s.words for s in transcript.segments)
 
 
+# --- first run on Windows (#65) ---------------------------------------------------------
+
+
+def test_first_download_is_announced_once(monkeypatch, caplog):
+    import faster_whisper.utils
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    from echo import transcribe
+
+    def not_cached(size, local_files_only=False):
+        raise LocalEntryNotFoundError(size)
+
+    monkeypatch.setattr(faster_whisper.utils, "download_model", not_cached)
+    with caplog.at_level("WARNING", logger="echo.transcribe"):
+        transcribe._announce_download("small")
+    assert caplog.messages == ['downloading whisper model "small" (~480 MB, first run only)']
+
+    caplog.clear()
+    monkeypatch.setattr(faster_whisper.utils, "download_model", lambda *a, **k: "/cache/small")
+    with caplog.at_level("WARNING", logger="echo.transcribe"):
+        transcribe._announce_download("small")
+    assert caplog.messages == [], "nothing printed once the model is cached"
+
+
+def test_invalid_model_name_is_not_announced(caplog):
+    from echo import transcribe
+
+    with caplog.at_level("WARNING", logger="echo.transcribe"):
+        transcribe._announce_download("large-v3-typo")
+    assert caplog.messages == [], "WhisperModel reports the invalid name itself"
+
+
 def test_auto_device_falls_back_to_cpu_without_cuda_libraries(audio: Path):
     """An NVIDIA card makes device="auto" pick CUDA; without the CUDA runtime installed,
     CTranslate2 fails on first use. Retry on the CPU instead of failing the stage."""
