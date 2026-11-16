@@ -556,3 +556,39 @@ def test_ffmpeg_without_libass_gives_a_clear_error(monkeypatch, tmp_path):
             ClipConfig(aspect="source"),
             extra_filter="subtitles=filename=a.ass",
         )
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.parametrize("background", ["blur", "black"])
+def test_extra_filter_attaches_after_the_blur_graph(make_video, tmp_path, background):
+    """Real encode: a 1:1 source goes through the labelled blur/pad graph, and the extra
+    filter (no libass needed) must attach to its final output pad."""
+    video = make_video(duration=1.0, size="240x240")
+    out = tmp_path / "clips" / "01-t.mp4"
+    cut_clips(
+        video,
+        [ClipSpec.between("t", 0.0, 0.8)],
+        [out],
+        ClipConfig(background=background),
+        extra_filter="crop=100:60:0:0",
+    )
+    assert (probe(out).width, probe(out).height) == (100, 60)
+
+
+def test_video_filter_and_extra_filter_together(monkeypatch, tmp_path):
+    video = tmp_path / "in.mp4"
+    video.write_bytes(b"x")
+    seen: list[list[str]] = []
+    monkeypatch.setattr(clip_module, "video_filter_for", lambda v, c: pytest.fail("not probed"))
+    monkeypatch.setattr(clip_module, "ffmpeg", lambda args: seen.append(args))
+    monkeypatch.setattr(clip_module.os, "replace", lambda a, b: None)
+    cut_clips(
+        video,
+        [ClipSpec.between("t", 0, 20)],
+        [tmp_path / "o.mp4"],
+        ClipConfig(),
+        video_filter="scale=540:960",
+        extra_filter="eq=gamma=1.1",
+    )
+    args = seen[0]
+    assert args[args.index("-vf") + 1] == "scale=540:960,eq=gamma=1.1"
