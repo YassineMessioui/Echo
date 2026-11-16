@@ -15,8 +15,9 @@ or on a **hosted API**. Pick one with `llm.provider` in `PipelineConfig`
 | `openai-compatible` | any OpenAI-compatible server at `llm.host` (LM Studio, vLLM, …) | optional | set `llm.model` |
 
 - `ECHO_LLM_API_KEY` overrides the provider-specific variable.
-- Keys are only read from the environment, never from config files, so they can't
-  end up in git.
+- Keys are read from the environment. For convenience, `echo-clips` also loads a
+  `.env` file (git-ignored; start from `cp .env.example .env`). Variables set in your
+  shell win over `.env`. Keys never go in config files, so they can't end up in git.
 - Set `llm.model` to use a different model from the same provider; set `llm.host`
   to go through a proxy.
 - Groq, OpenRouter, Gemini and Mistral have free tiers with rate limits. Free tiers

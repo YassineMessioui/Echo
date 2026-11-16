@@ -300,3 +300,24 @@ def test_random_job_id(fake, video, jobs_dir):
     (job_dir,) = jobs_dir.iterdir()
     assert len(job_dir.name) == 12
     int(job_dir.name, 16)
+
+
+def test_dotenv_is_loaded_without_overriding_the_shell(fake, video, jobs_dir, monkeypatch):
+    import os
+
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "from-shell")
+    (jobs_dir.parent / ".env").write_text("MISTRAL_API_KEY=from-dotenv\nGROQ_API_KEY=from-dotenv\n")
+    seen = {}
+    real = fake.run_pipeline
+
+    def capture(*args, **kwargs):
+        seen.update(mistral=os.environ.get("MISTRAL_API_KEY"), groq=os.environ.get("GROQ_API_KEY"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "run_pipeline", capture)
+    try:
+        assert run(video, jobs_dir).exit_code == 0
+    finally:
+        os.environ.pop("MISTRAL_API_KEY", None)  # load_dotenv sets it outside monkeypatch
+    assert seen == {"mistral": "from-dotenv", "groq": "from-shell"}
