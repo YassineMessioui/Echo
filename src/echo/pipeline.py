@@ -139,7 +139,11 @@ class _LazyTopicExtractor:
 
 class _LLMModels(Mapping[str, str]):
     """``LLMStage.models``, resolved when the stage records them (after extraction), so
-    the client's ``model_name`` is known without building the client up front."""
+    the client's ``model_name`` is known without building the client up front.
+
+    Note: ``LLMStage.run``'s ``if self.models:`` calls ``__len__``, which builds the
+    client; that's fine because it runs after extraction already built it.
+    """
 
     def __init__(self, extractor: _LazyTopicExtractor) -> None:
         self._extractor = extractor
@@ -184,7 +188,7 @@ def run_pipeline(
         t0 = time.perf_counter()
         try:
             if not forced and all(path.exists() for path in stage.outputs(job)):
-                _record(job, name, StageRecord(status=StageStatus.SKIPPED, finished_at=started))
+                _record_skipped(job, name, started)
                 emit(StageEvent(name, StageStatus.SKIPPED))
                 continue
             if forced and _has_force_field(stage):
@@ -206,6 +210,8 @@ def run_pipeline(
         )
         _record(job, name, done)
         emit(StageEvent(name, StageStatus.DONE, elapsed=time.perf_counter() - t0))
+        # This stage produced new outputs, so every later stage's outputs are stale.
+        first_forced = min(first_forced, order.index(name) + 1)
 
     return job.read_meta()
 
@@ -221,6 +227,23 @@ def _record(job: Job, name: StageName, record: StageRecord) -> None:
     meta = job.read_meta()
     meta.stages[name] = record
     job.write_meta(meta)
+
+
+def _record_skipped(job: Job, name: StageName, now: datetime) -> None:
+    """Mark ``name`` skipped, keeping the times of the run that produced its outputs."""
+    previous = job.read_meta().stages[name]
+    if previous.finished_at is not None and previous.status in (
+        StageStatus.DONE,
+        StageStatus.SKIPPED,
+    ):
+        record = StageRecord(
+            status=StageStatus.SKIPPED,
+            started_at=previous.started_at,
+            finished_at=previous.finished_at,
+        )
+    else:
+        record = StageRecord(status=StageStatus.SKIPPED, finished_at=now)
+    _record(job, name, record)
 
 
 def _fail(

@@ -87,7 +87,7 @@ def test_stage_with_a_missing_output_runs(job: Job) -> None:
     (job.root / "refine.out").unlink()
     log.clear()
     run_pipeline(job, fake_stages(log), CONFIG)
-    assert log == [StageName.REFINE]
+    assert log == [StageName.REFINE, StageName.CLIP]  # clip depends on the new clips.json
 
 
 def test_force_reruns_every_stage(job: Job) -> None:
@@ -302,3 +302,25 @@ def test_build_stages_creates_resources_when_run(
     assert models["whisper"] == "fake/whisper"
     assert models["llm"] == "fake/llm"
     assert models["llm_prompt"] == PROMPT_VERSION
+
+
+def test_a_stage_that_reruns_forces_later_stages(job: Job) -> None:
+    """Regenerating an earlier artifact must not leave later ones built from the old one."""
+    log: list[StageName] = []
+    run_pipeline(job, fake_stages(log), CONFIG)
+    (job.root / f"{StageName.LLM}.out").unlink()
+    log.clear()
+    run_pipeline(job, fake_stages(log), CONFIG)
+    assert log == [StageName.LLM, StageName.REFINE, StageName.CLIP]
+    assert statuses(job)[StageName.TRANSCRIBE] == StageStatus.SKIPPED
+
+
+def test_skipped_stage_keeps_the_times_it_was_produced(job: Job) -> None:
+    log: list[StageName] = []
+    run_pipeline(job, fake_stages(log), CONFIG)
+    produced = job.read_meta().stages[StageName.INGEST]
+    run_pipeline(job, fake_stages(log), CONFIG)
+    run_pipeline(job, fake_stages(log), CONFIG)
+    skipped = job.read_meta().stages[StageName.INGEST]
+    assert skipped.status == StageStatus.SKIPPED
+    assert (skipped.started_at, skipped.finished_at) == (produced.started_at, produced.finished_at)
