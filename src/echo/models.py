@@ -170,8 +170,13 @@ class JobMeta(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     job_id: str
-    source: str = Field(description="Original path of the input video.")
+    source: str = Field(description="Original path (or URL) of the input video.")
     created_at: datetime
+    source_url: str | None = Field(default=None, description="Set when the input was a link.")
+    source_info: dict[str, str | float] = Field(
+        default_factory=dict,
+        description="Link metadata from yt-dlp: id, extractor, title, uploader, duration.",
+    )
     stages: dict[StageName, StageRecord] = Field(
         default_factory=lambda: {name: StageRecord() for name in StageName}
     )

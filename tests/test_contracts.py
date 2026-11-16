@@ -236,3 +236,13 @@ def test_caption_config_defaults_and_validation():
     for bad in ({"colour": "yellow"}, {"highlight_colour": "#FFF"}, {"max_words": 0}):
         with pytest.raises(ValidationError):
             CaptionConfig(**bad)
+
+
+def test_job_meta_source_fields_are_optional(golden_job: Job):
+    """job.json files written before ``source_url`` / ``source_info`` existed still load."""
+    meta = golden_job.read_meta()
+    assert meta.source_url is None and meta.source_info == {}
+    linked = meta.model_copy(
+        update={"source_url": "https://youtu.be/x", "source_info": {"id": "x", "duration": 61.5}}
+    )
+    assert type(meta).model_validate_json(linked.model_dump_json()) == linked
