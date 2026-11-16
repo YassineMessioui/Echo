@@ -111,7 +111,8 @@ def test_job_create_is_idempotent(tmp_path: Path):
     video = tmp_path / "ep.mp4"
     video.write_bytes(b"fake")
     job = Job.create(tmp_path / "jobs", video, job_id="abc")
-    assert job.input_video.resolve() == video.resolve()
+    # A symlink, or a hardlink on Windows without symlink rights: same file either way.
+    assert job.input_video.samefile(video)
     meta = job.read_meta()
     assert meta.job_id == "abc"
     assert set(meta.stages) == set(StageName)
