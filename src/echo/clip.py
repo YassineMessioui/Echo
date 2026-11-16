@@ -29,10 +29,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
-from echo.captions import chain_filters
+from echo.captions import CaptionStyle, build_ass, chain_filters, subtitles_filter
 from echo.config import ClipConfig, PipelineConfig
-from echo.errors import ArtifactError, InvalidInputError
-from echo.ffmpeg import ffmpeg
+from echo.errors import ArtifactError, ExternalToolError, InvalidInputError
+from echo.ffmpeg import ffmpeg, has_filter
 from echo.interfaces import Clipper
 from echo.job import Job, _atomic_write
 from echo.models import ClipSpec, StageName
@@ -102,6 +102,12 @@ def cut_clips(
         raise ValueError(f"got {len(clips)} clips but {len(outputs)} output paths")
     if not video.is_file():
         raise InvalidInputError(f"input video not found: {video}")
+    if extra_filter and "subtitles=" in extra_filter and not has_filter("subtitles"):
+        raise ExternalToolError(
+            "this ffmpeg has no 'subtitles' filter (it was built without libass), so captions "
+            "can't be burned in. Install an ffmpeg build with libass, or turn captions off "
+            "(--no-captions, or caption.enabled = false)."
+        )
     if video_filter is None and clips:
         video_filter = video_filter_for(video, config)
     video_filter = chain_filters(video_filter, extra_filter)
@@ -113,8 +119,8 @@ _: Clipper = cut_clips
 
 
 MANIFEST = "manifest.json"
-"""``clips/manifest.json``: ``{file name: {"clip": ..., "config": ...}}`` fingerprints
-for the clips this stage wrote."""
+"""``clips/manifest.json``: ``{file name: {"clip": ..., "config": ..., "captions": ...}}``
+fingerprints for the clips this stage wrote (``captions`` only when burned in)."""
 
 
 def _hash(data: object) -> str:
@@ -125,8 +131,17 @@ def _clip_hash(clip: ClipSpec) -> str:
     return _hash(clip.model_dump(mode="json"))
 
 
-def _entry(clip: ClipSpec, config: ClipConfig) -> dict[str, str]:
-    return {"clip": _clip_hash(clip), "config": _hash(config.model_dump(mode="json"))}
+def _entry(clip: ClipSpec, config: ClipConfig, captions: str | None) -> dict[str, str]:
+    entry = {"clip": _clip_hash(clip), "config": _hash(config.model_dump(mode="json"))}
+    if captions is not None:
+        # The caption track's content: re-transcribing or restyling re-cuts the clip.
+        entry["captions"] = _hash(captions)
+    return entry
+
+
+def captions_path(clip_video: Path) -> Path:
+    """``clips/<nn>-<slug>.ass``, the caption track burned into ``clip_video``."""
+    return clip_video.with_suffix(".ass")
 
 
 @dataclass
@@ -134,7 +149,11 @@ class ClipStage:
     """Stage adapter: ``input.mp4`` + ``clips.json`` → ``clips/<nn>-<slug>.mp4``.
 
     A clip is reused only if its file exists and the manifest says it was cut with the
-    same boundaries and ``ClipConfig``; ``force`` re-cuts all of them.
+    same boundaries, ``ClipConfig`` and caption track; ``force`` re-cuts all of them.
+
+    With ``PipelineConfig.caption.enabled`` (the default), each clip gets a word-timed
+    caption track (``clips/<nn>-<slug>.ass``, kept for inspection) burned in after the
+    9:16 framing, in the same encode (#17).
 
     ``outputs()`` gets no config (``Stage`` protocol), so it only detects changed
     boundaries; changed encode settings are picked up whenever the stage runs.
@@ -167,19 +186,49 @@ class ClipStage:
         paths = clip_paths(job, clips)
         job.clips_dir.mkdir(parents=True, exist_ok=True)
         manifest = {k: v for k, v in _read_manifest(job).items() if (job.clips_dir / k).exists()}
+        burn = config.caption.enabled and bool(clips)
+        if burn and not job.transcript_path.is_file():
+            raise ArtifactError(
+                f"captions need {job.transcript_path}; run the transcribe stage first, or "
+                "turn captions off (--no-captions, or caption.enabled = false)"
+            )
+        transcript = job.read_transcript() if burn else None
+        style = CaptionStyle.from_config(config.caption)
 
         for clip, path in zip(clips, paths, strict=True):
-            entry = _entry(clip, config.clip)
+            ass = build_ass(transcript, clip, style) if transcript is not None else None
+            entry = _entry(clip, config.clip, ass)
             if not self.force and path.exists() and manifest.get(path.name) == entry:
                 continue
             manifest.pop(path.name, None)
-            self.clipper(job.input_video, [clip], [path], config.clip)
+            ass_path = captions_path(path)
+            if ass is None:
+                ass_path.unlink(missing_ok=True)
+                self.clipper(job.input_video, [clip], [path], config.clip)
+            else:
+                # Burn from a temp file and move it into place only once the clip is cut,
+                # so a failed encode never leaves a .ass that doesn't match its .mp4.
+                tmp = ass_path.with_name(f".{ass_path.name}.tmp")
+                tmp.write_bytes(ass.encode("utf-8-sig"))  # BOM: libass reads it anywhere
+                try:
+                    self.clipper(
+                        job.input_video,
+                        [clip],
+                        [path],
+                        config.clip,
+                        extra_filter=subtitles_filter(tmp),
+                    )
+                    os.replace(tmp, ass_path)
+                except BaseException:
+                    tmp.unlink(missing_ok=True)
+                    raise
             manifest[path.name] = entry
             _write_manifest(job, manifest)  # after every clip, so a crash loses at most one
 
         # Delete clips written for a previous clips.json that are no longer wanted.
         for name in set(manifest) - {p.name for p in paths}:
             (job.clips_dir / name).unlink(missing_ok=True)
+            captions_path(job.clips_dir / name).unlink(missing_ok=True)
             del manifest[name]
         _write_manifest(job, manifest)
 

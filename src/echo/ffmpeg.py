@@ -6,6 +6,7 @@ tail of stderr, or ``InvalidInputError`` when the input file itself is the probl
 
 from __future__ import annotations
 
+import functools
 import json
 import shutil
 import subprocess
@@ -62,6 +63,23 @@ def run(
 def ffmpeg(args: list[str], *, timeout: float | None = None) -> None:
     """Run ffmpeg quietly, overwriting outputs: ``ffmpeg -hide_banner -loglevel error -y ...``."""
     run("ffmpeg", ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", *args], timeout=timeout)
+
+
+@functools.cache
+def _filters() -> frozenset[str]:
+    """Names of the filters this ffmpeg build has (``ffmpeg -filters``), read once."""
+    names = set()
+    for line in run("ffmpeg", ["-hide_banner", "-filters"]).stdout.splitlines():
+        parts = line.split()
+        # " T.. subtitles  V->V  Render text subtitles ..." (flags, name, in->out, help)
+        if len(parts) >= 3 and "->" in parts[2]:
+            names.add(parts[1])
+    return frozenset(names)
+
+
+def has_filter(name: str) -> bool:
+    """Whether this ffmpeg build has the ``name`` filter (e.g. ``subtitles`` needs libass)."""
+    return name in _filters()
 
 
 @dataclass(frozen=True)

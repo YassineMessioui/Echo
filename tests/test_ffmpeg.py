@@ -77,3 +77,24 @@ def test_probe_ignores_cover_art(tmp_path, make_video):
     )
     info = ffmpeg.probe(audio)
     assert info.has_audio and not info.has_video and info.width is None
+
+
+def test_has_filter_parses_the_filter_list(monkeypatch):
+    listing = (
+        "Filters:\n  T.. = Timeline support\n  ------\n"
+        " TSC aformat           A->A       Convert the input audio to one of the formats.\n"
+        " T.. subtitles         V->V       Render text subtitles using libass.\n"
+    )
+
+    class Result:
+        stdout = listing
+
+    ffmpeg._filters.cache_clear()
+    monkeypatch.setattr(ffmpeg, "run", lambda tool, args: Result())
+    try:
+        assert ffmpeg.has_filter("subtitles")
+        assert ffmpeg.has_filter("aformat")
+        assert not ffmpeg.has_filter("Timeline")
+        assert not ffmpeg.has_filter("drawtext")
+    finally:
+        ffmpeg._filters.cache_clear()

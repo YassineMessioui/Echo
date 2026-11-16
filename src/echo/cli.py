@@ -28,7 +28,8 @@ from echo.config import (
     RefineConfig,
     TranscribeConfig,
 )
-from echo.errors import EchoError
+from echo.errors import EchoError, ExternalToolError
+from echo.ffmpeg import has_filter
 from echo.job import Job
 from echo.models import StageName, StageStatus
 from echo.pipeline import StageEvent, build_stages, run_pipeline
@@ -103,6 +104,24 @@ def _quiet_model_libraries() -> None:
     import), since faster-whisper is imported lazily by the transcribe stage."""
     for name, value in QUIET_ENV.items():
         os.environ.setdefault(name, value)
+
+
+def _check_captions_supported(config: PipelineConfig) -> None:
+    """With captions on, check for libass now rather than after transcription and the
+    LLM have run. If ffmpeg itself is missing, the ingest stage reports that."""
+    if not config.caption.enabled:
+        return
+    try:
+        supported = has_filter("subtitles")
+    except ExternalToolError:
+        return
+    if not supported:
+        typer.echo(
+            "error: this ffmpeg has no 'subtitles' filter (built without libass), so captions "
+            "can't be burned in. Install an ffmpeg build with libass, or run with --no-captions.",
+            err=True,
+        )
+        raise typer.Exit(1)
 
 
 def _build_config(
@@ -187,6 +206,10 @@ def run(
     max_duration: Annotated[
         float, typer.Option(help="Longest clip, in seconds (60 is the platform cap).")
     ] = _D.refine.max_duration,
+    max_clips: Annotated[
+        int | None,
+        typer.Option(min=1, help="Keep at most this many clips (those closest to ~37 s)."),
+    ] = _D.refine.max_clips,
     aspect: Annotated[
         Aspect, typer.Option(help="Output framing: 9:16 vertical, or keep the source framing.")
     ] = _DEFAULT_ASPECT,
@@ -213,10 +236,15 @@ def run(
         jobs_dir=jobs_dir,
         transcribe={"model_size": whisper_model, "language": language},
         llm={"provider": llm_provider, "model": llm_model},
-        refine={"min_duration": min_duration, "max_duration": max_duration},
+        refine={
+            "min_duration": min_duration,
+            "max_duration": max_duration,
+            "max_clips": max_clips,
+        },
         clip={"aspect": aspect.value, "crop_x": crop_x, "background": background.value},
         caption={"enabled": captions},
     )
+    _check_captions_supported(config)
 
     def on_event(event: StageEvent) -> None:
         if event.status is not StageStatus.RUNNING:
