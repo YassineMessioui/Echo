@@ -101,22 +101,33 @@ IDEAL_DURATION = 37.5
 complete, self-contained short-form clips)."""
 
 
-def _keep_best(clips: list[_Times], limit: int) -> list[_Times]:
+def _keep_best(clips: list[ClipSpec], limit: int) -> list[ClipSpec]:
     """The ``limit`` clips closest to ``IDEAL_DURATION`` (earlier wins ties), in time order.
     A stand-in until clip scoring (#21) ranks by engagement."""
-    if len(clips) <= limit:
-        return clips
-    ranked = sorted(
-        range(len(clips)),
-        key=lambda i: (abs((clips[i].end - clips[i].start) - IDEAL_DURATION), clips[i].start),
-    )
-    return [clips[i] for i in sorted(ranked[:limit])]
+    ranked = sorted(clips, key=lambda c: (abs(c.duration - IDEAL_DURATION), c.start))
+    return sorted(ranked[:limit], key=lambda c: c.start)
 
 
 def refine_clips(
     transcript: Transcript, topics: list[Topic], config: RefineConfig
 ) -> list[ClipSpec]:
-    """Implements ``echo.interfaces.BoundaryRefiner``."""
+    """Implements ``echo.interfaces.BoundaryRefiner``.
+
+    With ``config.max_clips``, all clips are refined first, the best ones are chosen
+    (``_keep_best``), and then only the chosen topics are refined again: a kept clip
+    shouldn't stay trimmed by an overlapping neighbour that was dropped.
+    """
+    clips = _refine(transcript, topics, config)
+    if config.max_clips is None or len(clips) <= config.max_clips:
+        return clips
+    kept = _keep_best(clips, config.max_clips)
+    titles = {c.topic_title for c in kept}
+    again = _refine(transcript, [t for t in topics if t.title in titles], config)
+    # Re-refining can merge/drop differently in rare cases; then keep the first choice.
+    return again if sorted(c.topic_title for c in again) == sorted(titles) else kept
+
+
+def _refine(transcript: Transcript, topics: list[Topic], config: RefineConfig) -> list[ClipSpec]:
     segments = transcript.segments
     for topic in topics:
         if topic.end_segment >= len(segments):
@@ -149,8 +160,6 @@ def refine_clips(
     for prev, cur in zip(clips, clips[1:], strict=False):
         prev.end = min(prev.end, cur.start)
     clips = [c for c in clips if c.end - c.start >= config.min_duration]
-    if config.max_clips is not None:
-        clips = _keep_best(clips, config.max_clips)
 
     result: list[ClipSpec] = []
     for i, clip in enumerate(clips):

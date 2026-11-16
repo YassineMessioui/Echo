@@ -265,3 +265,14 @@ def test_max_clips_ties_keep_the_earlier_clip():
 def test_max_clips_must_be_positive():
     with pytest.raises(ValueError):
         RefineConfig(max_clips=0)
+
+
+def test_kept_clip_is_not_left_trimmed_by_a_dropped_neighbour():
+    """Review on #71: A = segs 0-5, B = segs 4-8 (light overlap, B trimmed to start at
+    seg 6). With max_clips=1, B wins and must span its whole topic again (40-90)."""
+    transcript = _transcript([10] * 9)
+    topics = [_topic(0, 5, "A"), _topic(4, 8, "B")]
+    all_clips = refine_clips(transcript, topics, RefineConfig(padding=0))
+    assert [(c.topic_title, c.start, c.end) for c in all_clips] == [("A", 0, 60), ("B", 60, 90)]
+    (only,) = refine_clips(transcript, topics, RefineConfig(padding=0, max_clips=1))
+    assert (only.topic_title, only.start, only.end) == ("B", 40, 90)
