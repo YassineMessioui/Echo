@@ -140,8 +140,8 @@ publish:
 
 ## Team
 
-- _Name_: _role TBD_
-- _Name_: _role TBD_
+- **Imad Ait Ben Salah** ([Imdbn](https://github.com/Imdbn)): co-owner
+- **Yassine Messioui** ([YassineMessioui](https://github.com/YassineMessioui)): co-owner
 
 ## Open questions
 
