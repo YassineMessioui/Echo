@@ -19,6 +19,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from echo.config import CaptionConfig
 from echo.models import ClipSpec, Transcript, Word
 
 PLAY_RES = (1080, 1920)
@@ -44,6 +45,11 @@ class CaptionStyle:
     max_gap: float = 0.6
     """A pause longer than this (seconds) starts a new line."""
     uppercase: bool = True
+
+    @classmethod
+    def from_config(cls, config: CaptionConfig) -> CaptionStyle:
+        """The style for ``PipelineConfig.caption`` (``enabled`` is the caller's concern)."""
+        return cls(**config.model_dump(exclude={"enabled"}))
 
 
 @dataclass(frozen=True)

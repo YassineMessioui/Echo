@@ -147,7 +147,7 @@ Every platform needs its own developer app and OAuth credentials. Check each one
 ### Prerequisites
 
 - **Python 3.12** and [uv](https://docs.astral.sh/uv/getting-started/installation/) (uv can install Python for you).
-- **ffmpeg** and `ffprobe` on your PATH: `brew install ffmpeg` (macOS), `sudo apt install ffmpeg` (Debian/Ubuntu), `choco install ffmpeg` (Windows).
+- **ffmpeg** and `ffprobe` on your PATH, built **with libass** for burned-in captions: `sudo apt install ffmpeg` (Debian/Ubuntu) and `choco install ffmpeg` (Windows) include it. Homebrew's default `ffmpeg` (macOS) does not: use a build with libass, or turn captions off (`--no-captions` / `caption.enabled = false`).
 - **An LLM** for topic extraction. The default is local [Ollama](https://ollama.com):
   ```bash
   ollama pull llama3.2:3b
