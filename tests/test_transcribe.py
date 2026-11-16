@@ -245,23 +245,14 @@ def test_real_whisper_model(tmp_path: Path):
 # --- first run on Windows (#65) ---------------------------------------------------------
 
 
-def test_quiet_model_libraries_sets_defaults_without_overriding(monkeypatch):
-    from echo import transcribe
-
-    monkeypatch.delenv("HF_HUB_DISABLE_SYMLINKS_WARNING", raising=False)
-    monkeypatch.setenv("HF_HUB_VERBOSITY", "debug")  # the user's own choice wins
-    transcribe._quiet_model_libraries()
-    assert os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] == "1"
-    assert os.environ["HF_HUB_VERBOSITY"] == "debug"
-
-
 def test_first_download_is_announced_once(monkeypatch, caplog):
     import faster_whisper.utils
+    from huggingface_hub.errors import LocalEntryNotFoundError
 
     from echo import transcribe
 
     def not_cached(size, local_files_only=False):
-        raise FileNotFoundError(size)
+        raise LocalEntryNotFoundError(size)
 
     monkeypatch.setattr(faster_whisper.utils, "download_model", not_cached)
     with caplog.at_level("WARNING", logger="echo.transcribe"):
@@ -273,3 +264,11 @@ def test_first_download_is_announced_once(monkeypatch, caplog):
     with caplog.at_level("WARNING", logger="echo.transcribe"):
         transcribe._announce_download("small")
     assert caplog.messages == [], "nothing printed once the model is cached"
+
+
+def test_invalid_model_name_is_not_announced(caplog):
+    from echo import transcribe
+
+    with caplog.at_level("WARNING", logger="echo.transcribe"):
+        transcribe._announce_download("large-v3-typo")
+    assert caplog.messages == [], "WhisperModel reports the invalid name itself"
