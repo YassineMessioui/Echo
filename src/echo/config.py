@@ -1,7 +1,7 @@
 """Pipeline configuration. Each layer reads only its own section."""
 
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -63,6 +63,31 @@ class ClipConfig(_Section):
     """Horizontal crop position for 9:16 (0 = left edge, 0.5 = centre, 1 = right edge)."""
 
 
+HexColour = Annotated[str, Field(pattern=r"^#[0-9A-Fa-f]{6}$")]
+
+
+class CaptionConfig(_Section):
+    """Burned-in captions (#17): a few words at a time, the spoken word highlighted.
+
+    Sizes are in pixels of the 1080x1920 output; captions scale with other sizes.
+    """
+
+    enabled: bool = True
+    font: str = "Arial"
+    font_size: int = Field(default=84, gt=0)
+    colour: HexColour = "#FFFFFF"
+    highlight_colour: HexColour = "#FFD400"
+    outline_colour: HexColour = "#000000"
+    outline: int = Field(default=6, ge=0)
+    margin_bottom: int = Field(default=420, ge=0)
+    """Distance from the bottom edge; the default keeps clear of TikTok/Reels buttons."""
+    max_words: int = Field(default=3, ge=1)
+    """Words on screen at once."""
+    max_gap: float = Field(default=0.6, ge=0)
+    """A pause longer than this (seconds) starts a new caption line."""
+    uppercase: bool = True
+
+
 class PipelineConfig(_Section):
     jobs_dir: Path = Path("jobs")
     ingest: IngestConfig = IngestConfig()
@@ -71,3 +96,4 @@ class PipelineConfig(_Section):
     llm: LLMConfig = LLMConfig()
     refine: RefineConfig = RefineConfig()
     clip: ClipConfig = ClipConfig()
+    caption: CaptionConfig = CaptionConfig()
