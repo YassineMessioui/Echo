@@ -96,6 +96,23 @@ def _cut_long_segment(segment: Segment, max_d: float) -> float:
     return max(fitting, default=limit)
 
 
+IDEAL_DURATION = 37.5
+"""Seconds; clips closest to this are kept by ``max_clips`` (30–45 s is the sweet spot for
+complete, self-contained short-form clips)."""
+
+
+def _keep_best(clips: list[_Times], limit: int) -> list[_Times]:
+    """The ``limit`` clips closest to ``IDEAL_DURATION`` (earlier wins ties), in time order.
+    A stand-in until clip scoring (#21) ranks by engagement."""
+    if len(clips) <= limit:
+        return clips
+    ranked = sorted(
+        range(len(clips)),
+        key=lambda i: (abs((clips[i].end - clips[i].start) - IDEAL_DURATION), clips[i].start),
+    )
+    return [clips[i] for i in sorted(ranked[:limit])]
+
+
 def refine_clips(
     transcript: Transcript, topics: list[Topic], config: RefineConfig
 ) -> list[ClipSpec]:
@@ -132,6 +149,8 @@ def refine_clips(
     for prev, cur in zip(clips, clips[1:], strict=False):
         prev.end = min(prev.end, cur.start)
     clips = [c for c in clips if c.end - c.start >= config.min_duration]
+    if config.max_clips is not None:
+        clips = _keep_best(clips, config.max_clips)
 
     result: list[ClipSpec] = []
     for i, clip in enumerate(clips):

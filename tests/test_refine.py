@@ -231,3 +231,37 @@ def test_invariants_hold_on_random_inputs(seed: int):
     )
     clips = refine_clips(transcript, topics, config)
     check_invariants(transcript, clips, config)
+
+
+# --- max_clips (#62) ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("max_clips", "expected"),
+    [
+        pytest.param(None, ["a", "b", "c", "d"], id="no-limit"),
+        pytest.param(9, ["a", "b", "c", "d"], id="limit-above-count"),
+        pytest.param(2, ["b", "d"], id="closest-to-ideal-kept-in-time-order"),
+        pytest.param(1, ["b"], id="single"),
+    ],
+)
+def test_max_clips(max_clips, expected):
+    # Topic lengths: a=16 s, b=36 s, c=58 s, d=40 s (b and d are closest to 37.5 s).
+    transcript = _transcript([16, 36, 58, 40])
+    topics = [_topic(0, 0, "a"), _topic(1, 1, "b"), _topic(2, 2, "c"), _topic(3, 3, "d")]
+    config = RefineConfig(padding=0, max_clips=max_clips)
+    clips = refine_clips(transcript, topics, config)
+    assert [c.topic_title for c in clips] == expected
+    check_invariants(transcript, clips, config)
+
+
+def test_max_clips_ties_keep_the_earlier_clip():
+    transcript = _transcript([30, 30, 30])
+    topics = [_topic(i, i, t) for i, t in enumerate("xyz")]
+    clips = refine_clips(transcript, topics, RefineConfig(padding=0, max_clips=2))
+    assert [c.topic_title for c in clips] == ["x", "y"]
+
+
+def test_max_clips_must_be_positive():
+    with pytest.raises(ValueError):
+        RefineConfig(max_clips=0)
