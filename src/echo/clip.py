@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
+from echo.captions import chain_filters
 from echo.config import ClipConfig, PipelineConfig
 from echo.errors import ArtifactError, InvalidInputError
 from echo.ffmpeg import ffmpeg
@@ -85,11 +86,13 @@ def cut_clips(
     config: ClipConfig,
     *,
     video_filter: str | None = None,
+    extra_filter: str | None = None,
 ) -> None:
     """Implements ``echo.interfaces.Clipper``.
 
     The frame is shaped by ``config.aspect`` (see ``echo.reframe``); pass
-    ``video_filter`` to use a different ``-vf`` filter instead.
+    ``video_filter`` to use a different ``-vf`` filter instead. ``extra_filter`` (e.g.
+    burned-in captions) is chained after it, in the same encode.
 
     Raises ValueError if ``clips`` and ``outputs`` differ in length, InvalidInputError if
     ``video`` is missing or has no video stream and ExternalToolError if ffmpeg fails.
@@ -101,6 +104,7 @@ def cut_clips(
         raise InvalidInputError(f"input video not found: {video}")
     if video_filter is None and clips:
         video_filter = video_filter_for(video, config)
+    video_filter = chain_filters(video_filter, extra_filter)
     for clip, out in zip(clips, outputs, strict=True):
         _cut_one(video, clip, out, config, video_filter)
 
