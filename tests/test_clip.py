@@ -21,10 +21,13 @@ class RecordingClipper:
     fail_on: int | None = None
     """Raise on this call number (0-based), like an ffmpeg crash mid-run."""
 
-    def __call__(self, video, clips, outputs, config) -> None:
+    extra_filters: list[str | None] = field(default_factory=list)
+
+    def __call__(self, video, clips, outputs, config, *, extra_filter=None) -> None:
         if self.fail_on == len(self.calls):
             raise ExternalToolError("boom")
         self.calls.append((clips, outputs))
+        self.extra_filters.append(extra_filter)
         for out in outputs:
             out.write_bytes(b"clip")
 
@@ -354,3 +357,30 @@ def test_stage_outputs_vertical_clips_and_recuts_on_aspect_change(make_video, tm
     assert all((probe(p).width, probe(p).height) == TARGET for p in _paths(job))
     ClipStage().run(job, PipelineConfig(clip=ClipConfig(aspect="source")))
     assert all((probe(p).width, probe(p).height) == (320, 180) for p in _paths(job))
+
+
+def test_extra_filter_is_chained_after_reframing(monkeypatch, tmp_path):
+    video = tmp_path / "in.mp4"
+    video.write_bytes(b"x")
+    seen: list[list[str]] = []
+    monkeypatch.setattr(clip_module, "video_filter_for", lambda v, c: "crop=1:1,scale=1080:1920")
+    monkeypatch.setattr(clip_module, "ffmpeg", lambda args: seen.append(args))
+    monkeypatch.setattr(clip_module.os, "replace", lambda a, b: None)
+    clip = ClipSpec.between("t", 0, 20)
+    cut_clips(video, [clip], [tmp_path / "o.mp4"], ClipConfig(), extra_filter="subtitles=x")
+    args = seen[0]
+    assert args[args.index("-vf") + 1] == "crop=1:1,scale=1080:1920,subtitles=x"
+
+
+def test_extra_filter_without_reframing(monkeypatch, tmp_path):
+    video = tmp_path / "in.mp4"
+    video.write_bytes(b"x")
+    seen: list[list[str]] = []
+    monkeypatch.setattr(clip_module, "ffmpeg", lambda args: seen.append(args))
+    monkeypatch.setattr(clip_module.os, "replace", lambda a, b: None)
+    clip = ClipSpec.between("t", 0, 20)
+    cut_clips(
+        video, [clip], [tmp_path / "o.mp4"], ClipConfig(aspect="source"), extra_filter="sub=x"
+    )
+    args = seen[0]
+    assert args[args.index("-vf") + 1] == "sub=x"
