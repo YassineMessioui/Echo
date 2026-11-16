@@ -4,7 +4,16 @@ from pathlib import Path
 import pytest
 
 from echo import clip as clip_module
-from echo.clip import MANIFEST, ClipStage, build_ffmpeg_args, clip_paths, cut_clips
+from echo import ffmpeg as ffmpeg_module
+from echo.captions import subtitles_filter
+from echo.clip import (
+    MANIFEST,
+    ClipStage,
+    build_ffmpeg_args,
+    captions_path,
+    clip_paths,
+    cut_clips,
+)
 from echo.config import ClipConfig, PipelineConfig
 from echo.errors import ArtifactError, ExternalToolError, InvalidInputError
 from echo.ffmpeg import probe
@@ -384,3 +393,125 @@ def test_extra_filter_without_reframing(monkeypatch, tmp_path):
     )
     args = seen[0]
     assert args[args.index("-vf") + 1] == "sub=x"
+
+
+# --- captions (#17) -----------------------------------------------------------------
+
+
+def _caption_config(**caption) -> PipelineConfig:
+    from echo.config import CaptionConfig
+
+    return PipelineConfig(caption=CaptionConfig(**caption))
+
+
+def test_captions_are_written_and_burned_in(job_copy):
+    job = _job_with_video(job_copy)
+    clipper = RecordingClipper()
+    ClipStage(clipper=clipper).run(job, PipelineConfig())
+
+    for path, extra in zip(_paths(job), clipper.extra_filters, strict=True):
+        ass = captions_path(path)
+        assert ass.read_bytes().startswith(b"\xef\xbb\xbf")
+        assert "Dialogue:" in ass.read_text(encoding="utf-8-sig")
+        assert extra == subtitles_filter(ass)
+
+
+def test_captions_disabled(job_copy):
+    job = _job_with_video(job_copy)
+    clipper = RecordingClipper()
+    ClipStage(clipper=clipper).run(job, _caption_config(enabled=False))
+    assert clipper.extra_filters == [None, None]
+    assert not any(captions_path(p).exists() for p in _paths(job))
+
+
+def test_transcript_change_recuts_only_affected_clips(job_copy):
+    job = _job_with_video(job_copy)
+    ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
+
+    again = RecordingClipper()
+    ClipStage(clipper=again).run(job, PipelineConfig())
+    assert again.calls == [], "same captions: nothing re-cut"
+
+    # Fix a word in the second clip's segment (e.g. a corrected transcript).
+    transcript = job.read_transcript()
+    seg = transcript.segments[5]
+    word = seg.words[0].model_copy(update={"text": "EDITED"})
+    seg = seg.model_copy(update={"words": [word, *seg.words[1:]]})
+    segments = [*transcript.segments[:5], seg, *transcript.segments[6:]]
+    job.write_transcript(transcript.model_copy(update={"segments": segments}))
+
+    edited = RecordingClipper()
+    ClipStage(clipper=edited).run(job, PipelineConfig())
+    assert [p.name for _, p in edited.cut] == [_paths(job)[1].name]
+    assert "EDITED" in captions_path(_paths(job)[1]).read_text(encoding="utf-8-sig")
+
+
+def test_style_change_and_toggling_captions_recut(job_copy):
+    job = _job_with_video(job_copy)
+    ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
+
+    restyled = RecordingClipper()
+    ClipStage(clipper=restyled).run(job, _caption_config(highlight_colour="#00FF00"))
+    assert len(restyled.cut) == 2
+
+    off = RecordingClipper()
+    ClipStage(clipper=off).run(job, _caption_config(enabled=False))
+    assert len(off.cut) == 2
+    assert not any(captions_path(p).exists() for p in _paths(job)), "stale .ass removed"
+
+
+def test_deleted_clips_take_their_captions_with_them(job_copy):
+    job = _job_with_video(job_copy)
+    ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
+    gone = _paths(job)[1]
+    job.write_clips(job.read_clips()[:1])
+    ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
+    assert not gone.exists() and not captions_path(gone).exists()
+
+
+@pytest.mark.ffmpeg
+def test_stage_burns_captions_into_vertical_clips(make_video, tmp_path):
+    """Real ffmpeg: reframe + captions in one encode, 1080x1920 out, captions visible."""
+    from echo.models import Segment, Transcript, Word
+
+    video = make_video(duration=3.0, size="320x180")
+    words = [
+        Word(start=0.2 + i * 0.4, end=0.55 + i * 0.4, text=w)
+        for i, w in enumerate(["Burned", "in", "captions", "look", "like", "this."])
+    ]
+    transcript = Transcript(
+        language="en",
+        duration=3.0,
+        segments=[Segment(id=0, start=0.2, end=2.55, text="…", words=words)],
+    )
+
+    def run(name: str, config: PipelineConfig) -> bytes:
+        job = Job.create(tmp_path / name, video)
+        job.write_transcript(transcript)
+        job.write_clips([ClipSpec.between("Caption test", 0.0, 2.8)])
+        ClipStage().run(job, config)
+        out = _paths(job)[0]
+        info = probe(out)
+        assert (info.width, info.height) == TARGET
+        assert info.duration == pytest.approx(2.8, abs=0.1)
+        frame = tmp_path / f"{name}.raw"
+        ffmpeg_module.ffmpeg(
+            [
+                "-ss",
+                "0.5",
+                "-i",
+                str(out),
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "gray",
+                str(frame),
+            ]
+        )
+        return frame.read_bytes()
+
+    with_captions = run("with", PipelineConfig())
+    without = run("without", _caption_config(enabled=False))
+    assert with_captions != without
