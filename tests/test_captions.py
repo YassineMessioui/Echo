@@ -149,7 +149,7 @@ def test_write_captions(golden_job: Job, tmp_path: Path):
 
 def test_subtitles_filter_escapes_windows_paths():
     path = Path("C:/Users/a b/it's [1], x.ass")
-    assert subtitles_filter(path) == (
+    assert subtitles_filter(path, fonts_dir=None) == (
         "subtitles=filename=C\\\\:/Users/a b/it\\\\\\'s \\[1\\]\\, x.ass"
     )
 
@@ -172,6 +172,8 @@ def _first_frame(video: Path, out: Path, vf: str | None) -> bytes:
 @pytest.mark.ffmpeg
 def test_captions_are_burned_in(make_video, tmp_path: Path):
     """Real ffmpeg + libass, with a path that needs every kind of escaping."""
+    if not ffmpeg.has_filter("subtitles"):
+        pytest.skip("this ffmpeg has no libass ('subtitles' filter)")
     video = make_video(duration=1.0, size="270x480")
     transcript = _transcript([(0.0, 0.8, "Caption"), (0.8, 1.0, "test")], duration=1.0)
     ass = tmp_path / "it's a [test], ok" / "01-clip.ass"
@@ -181,3 +183,57 @@ def test_captions_are_burned_in(make_video, tmp_path: Path):
     captioned = _first_frame(video, tmp_path / "captioned.raw", subtitles_filter(ass))
     assert len(plain) == len(captioned) == 270 * 480 * 3
     assert plain != captioned, "the caption should change the frame"
+
+
+def test_subtitles_filter_points_libass_at_the_bundled_fonts():
+    from echo.captions import FONTS_DIR
+
+    assert (FONTS_DIR / "Montserrat-ExtraBold.ttf").is_file()
+    assert (FONTS_DIR / "OFL.txt").is_file()
+    vf = subtitles_filter(Path("C:/jobs/a.ass"), fonts_dir=Path("C:/fonts dir"))
+    # The ":" between the two options is ffmpeg's separator, so it isn't escaped.
+    assert vf == "subtitles=filename=C\\\\:/jobs/a.ass:fontsdir=C\\\\:/fonts dir"
+
+
+def test_default_caption_font_is_bundled():
+    from echo.config import CaptionConfig
+
+    assert CaptionConfig().font == "Montserrat ExtraBold"
+    assert "Style: Caption,Montserrat ExtraBold," in build_ass(
+        _transcript([(0.0, 0.5, "hi")]), ClipSpec.between("t", 0.0, 5.0)
+    )
+
+
+@pytest.mark.ffmpeg
+def test_bundled_font_is_used_by_libass(make_video, tmp_path: Path):
+    """Real ffmpeg: libass picks Montserrat ExtraBold from the bundled folder, not a fallback."""
+    if " subtitles " not in ffmpeg.run("ffmpeg", ["-hide_banner", "-filters"]).stdout:
+        pytest.skip("this ffmpeg has no libass ('subtitles' filter)")
+    video = make_video(duration=1.0, size="270x480")
+    ass = tmp_path / "c.ass"
+    write_captions(
+        _transcript([(0.0, 0.9, "Montserrat")], duration=1.0),
+        [ClipSpec.between("t", 0.0, 1.0)],
+        [ass],
+    )
+    result = ffmpeg.run(
+        "ffmpeg",
+        [
+            "-hide_banner",
+            "-v",
+            "verbose",
+            "-nostdin",
+            "-i",
+            str(video),
+            "-vf",
+            subtitles_filter(ass),
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ],
+    )
+    chosen = [line for line in result.stderr.splitlines() if "fontselect" in line]
+    assert chosen, "libass reported no font selection"
+    assert all("Montserrat" in line for line in chosen), chosen

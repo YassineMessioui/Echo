@@ -51,6 +51,13 @@ class FakePipeline:
         return self.calls[-1]["config"]
 
 
+@pytest.fixture(autouse=True)
+def _libass_available(monkeypatch):
+    """CLI tests don't depend on the local ffmpeg build (e.g. Homebrew without libass);
+    the missing-libass path is tested explicitly below."""
+    monkeypatch.setattr(cli, "has_filter", lambda name: True)
+
+
 @pytest.fixture
 def fake(monkeypatch) -> FakePipeline:
     fake = FakePipeline()
@@ -97,6 +104,7 @@ def test_help_lists_every_option():
         "--llm-model",
         "--min-duration",
         "--max-duration",
+        "--max-clips",
         "--aspect",
         "--crop-x",
         "--background",
@@ -152,6 +160,7 @@ def test_options_map_to_config_fields(fake, video, jobs_dir):
         "--llm-model", "openai/gpt-oss-120b",
         "--min-duration", "20",
         "--max-duration", "45",
+        "--max-clips", "3",
         "--aspect", "source",
         "--crop-x", "0.25",
         "--background", "black",
@@ -162,6 +171,7 @@ def test_options_map_to_config_fields(fake, video, jobs_dir):
     assert (c.transcribe.model_size, c.transcribe.language) == ("medium", "fr")
     assert (c.llm.provider, c.llm.model) == ("groq", "openai/gpt-oss-120b")
     assert (c.refine.min_duration, c.refine.max_duration) == (20.0, 45.0)
+    assert c.refine.max_clips == 3
     assert (c.clip.aspect, c.clip.crop_x, c.clip.background) == ("source", 0.25, "black")
     # untouched fields keep their defaults
     defaults = PipelineConfig()
@@ -321,3 +331,26 @@ def test_dotenv_is_loaded_without_overriding_the_shell(fake, video, jobs_dir, mo
     finally:
         os.environ.pop("MISTRAL_API_KEY", None)  # load_dotenv sets it outside monkeypatch
     assert seen == {"mistral": "from-dotenv", "groq": "from-shell"}
+
+
+def test_missing_libass_fails_before_running_any_stage(fake, video, jobs_dir, monkeypatch):
+    monkeypatch.setattr(cli, "has_filter", lambda name: False)
+    result = run(video, jobs_dir)
+    assert result.exit_code == 1
+    assert "--no-captions" in result.stderr
+    assert fake.calls == [], "the pipeline never started"
+    assert run(video, jobs_dir, "--no-captions").exit_code == 0
+
+
+def test_libass_check_skipped_when_ffmpeg_is_missing(fake, video, jobs_dir, monkeypatch):
+    def no_ffmpeg(name):
+        raise cli.ExternalToolError("ffmpeg not found on PATH")
+
+    monkeypatch.setattr(cli, "has_filter", no_ffmpeg)
+    assert run(video, jobs_dir).exit_code == 0  # left to the ingest stage to report
+
+
+def test_max_clips_defaults_to_all_and_rejects_zero(fake, video, jobs_dir):
+    assert run(video, jobs_dir).exit_code == 0
+    assert fake.config.refine.max_clips is None
+    assert run(video, jobs_dir, "--max-clips", "0").exit_code == 2
