@@ -5,6 +5,9 @@ Each segment is rendered as one numbered line::
     [12] 00:03:41–00:03:47 text...
 
 The LLM refers to segments by these numbers, so a window never splits a segment.
+
+``ChunkConfig.max_tokens = "auto"`` (the default) is resolved per provider and model
+by ``resolve_max_tokens``: see ``LONG_CONTEXT_MODELS``.
 """
 
 from __future__ import annotations
@@ -12,10 +15,59 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 
-from echo.config import AUTO_MAX_TOKENS, ChunkConfig
+from echo.config import AUTO_MAX_TOKENS, ChunkConfig, LLMConfig
+from echo.llm.hosted import GENERIC_PROVIDER, PROVIDERS
 from echo.models import Segment, Transcript, TranscriptWindow
 
 TokenCounter = Callable[[str], int]
+
+LONG_CONTEXT_MAX_TOKENS = 24_000
+"""``"auto"`` budget for hosted models with a context of 128k tokens or more. The
+window is the transcript part only: the prompt, the JSON answer and the token-estimate
+error all fit in the remaining 100k+ tokens."""
+
+LONG_CONTEXT_MODELS: tuple[str, ...] = (
+    "openai/gpt-oss-",  # Groq, OpenRouter: 131k
+    "gpt-oss-",
+    "gemini-",  # Gemini 2.x/flash/flash-lite/pro, *-latest aliases: 1M
+    "google/gemini-",  # through OpenRouter
+    "meta-llama/llama-3.3-70b",  # OpenRouter: 128k
+    "llama-3.3-70b",  # Groq: 128k
+    "mistral-small",  # mistral-small-latest (3.x): 128k
+    "mistral-medium",  # 128k
+    "mistral-large",  # 128k
+    "gpt-4.1",  # gpt-4.1, -mini, -nano: 1M
+    "gpt-4o",  # 128k
+)
+"""Model-name prefixes (lower case) that get ``LONG_CONTEXT_MAX_TOKENS`` under
+``"auto"`` on a hosted provider. Anything else gets ``AUTO_MAX_TOKENS``."""
+
+_LLM_DEFAULTS = LLMConfig()
+
+
+def resolve_max_tokens(chunk: ChunkConfig, llm: LLMConfig | None = None) -> int:
+    """The window budget for ``chunk`` with the model of ``llm``.
+
+    An explicit ``chunk.max_tokens`` wins. ``"auto"`` gives ``LONG_CONTEXT_MAX_TOKENS``
+    for a hosted provider (one of ``echo.llm.hosted.PROVIDERS`` or
+    ``openai-compatible``) whose model starts with one of ``LONG_CONTEXT_MODELS``, and
+    ``AUTO_MAX_TOKENS`` otherwise: Ollama and other local models (small models, and
+    Ollama's default context is a few thousand tokens), unknown models and providers,
+    or no ``llm`` at all. As in ``OpenAICompatibleClient.from_config``, a hosted
+    provider left on the Ollama default model uses the provider's default model.
+    """
+    if chunk.max_tokens != "auto":
+        return chunk.max_tokens
+    if llm is None or llm.provider == "ollama":
+        return AUTO_MAX_TOKENS
+    model = llm.model
+    if llm.provider in PROVIDERS and model == _LLM_DEFAULTS.model:
+        model = PROVIDERS[llm.provider].default_model
+    elif llm.provider not in PROVIDERS and llm.provider != GENERIC_PROVIDER:
+        return AUTO_MAX_TOKENS
+    if model.lower().startswith(LONG_CONTEXT_MODELS):
+        return LONG_CONTEXT_MAX_TOKENS
+    return AUTO_MAX_TOKENS
 
 
 def approx_tokens(text: str) -> int:
@@ -37,18 +89,22 @@ def format_segment(segment: Segment) -> str:
 class WindowChunker:
     """Implements ``echo.interfaces.Chunker``.
 
-    Windows are filled greedily up to ``config.max_tokens``; each window after the
+    Windows are filled greedily up to the budget (``resolve_max_tokens(config, llm)``,
+    so ``"auto"`` follows the model of ``llm``); each window after the
     first starts ``config.overlap_segments`` segments before the previous one ended.
     A segment that alone exceeds the budget gets a window of its own. The overlap is
     smaller than configured only when the previous window has too few segments to
     overlap by that much and still make progress.
     """
 
-    def __init__(self, count_tokens: TokenCounter = approx_tokens) -> None:
+    def __init__(
+        self, count_tokens: TokenCounter = approx_tokens, llm: LLMConfig | None = None
+    ) -> None:
         self.count_tokens = count_tokens
+        self.llm = llm
 
     def __call__(self, transcript: Transcript, config: ChunkConfig) -> list[TranscriptWindow]:
-        budget = AUTO_MAX_TOKENS if config.max_tokens == "auto" else config.max_tokens
+        budget = resolve_max_tokens(config, self.llm)
         lines = [format_segment(seg) for seg in transcript.segments]
         # Count each line with its trailing newline: for a sub-additive counter
         # (like chars/4 rounded up) the sum never underestimates the joined text.

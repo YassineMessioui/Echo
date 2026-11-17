@@ -24,6 +24,32 @@ or on a **hosted API**. Pick one with `llm.provider` in `PipelineConfig`
   change often, so check the provider's page. Some (e.g. Gemini's free tier) may
   use your prompts to improve their models: transcripts are sent to the provider.
 
+## Window size (`chunk.max_tokens`)
+
+The transcript is sent in overlapping windows (`chunk.overlap_segments` segments of
+overlap, 5 by default). `chunk.max_tokens` is the transcript budget of one window,
+in estimated tokens (characters / 4). The default, `"auto"`, follows the model
+(`echo.llm.chunking.resolve_max_tokens`):
+
+| Provider / model | `"auto"` budget |
+|---|---|
+| `ollama` (any model) | 3,000 |
+| hosted model starting with `openai/gpt-oss-`, `gpt-oss-`, `gemini-`, `google/gemini-`, `meta-llama/llama-3.3-70b`, `llama-3.3-70b`, `mistral-small`, `mistral-medium`, `mistral-large`, `gpt-4.1`, `gpt-4o` (128k+ context) | 24,000 |
+| any other hosted model, `openai-compatible` with an unknown model, unknown provider | 3,000 |
+
+This covers the default model of every hosted provider above. A hosted provider left
+on the Ollama default model uses the provider's default model. 24k leaves over 100k
+tokens of headroom for the prompt and the answer on these models. Ollama stays at
+3k whatever the model: Ollama's default context is only a few thousand tokens, and
+local models are usually small.
+
+Set a number to override it, e.g. `chunk.max_tokens = 8000`.
+
+Trade-off: bigger windows mean fewer calls (less rate-limit pressure, often faster)
+and fewer topics cut at window edges. But very long windows can make a model,
+especially a small one, miss topics or return fewer, coarser ones. If a long video
+gets too few topics on a hosted model, try a smaller budget.
+
 ## Local: Ollama
 
 ```bash
