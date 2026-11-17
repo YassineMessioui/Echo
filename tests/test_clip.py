@@ -1,5 +1,8 @@
 import http.server
+import json
+import shutil
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,6 +18,7 @@ from echo.clip import (
     build_ffmpeg_args,
     captions_path,
     clip_paths,
+    clip_workers,
     cut_clips,
 )
 from echo.config import CaptionConfig, ClipConfig, PipelineConfig
@@ -734,3 +738,197 @@ def test_up_to_date_clips_count_as_done(job_copy):
     assert len(clipper.cut) == 1
     assert [f for f, _ in reports] == sorted(f for f, _ in reports)
     assert reports[-1] == (1.0, f"clip {n}/{n}")
+
+
+# --- parallel clips (#57) -----------------------------------------------------------------
+
+
+@dataclass
+class SlowClipper:
+    """Thread-safe fake ``Clipper`` with an uneven per-clip delay; fails on given titles.
+
+    Tracks how many clips were being cut at once (``peak``)."""
+
+    delay: float = 0.03
+    fail_titles: frozenset[str] = frozenset()
+    started: list[str] = field(default_factory=list)
+    finished: list[str] = field(default_factory=list)
+    peak: int = 0
+    _running: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def __call__(self, video, clips, outputs, config, *, extra_filter=None) -> None:
+        (clip,) = clips
+        with self.lock:
+            self.started.append(clip.topic_title)
+            self._running += 1
+            self.peak = max(self.peak, self._running)
+        try:
+            # Uneven, so clips finish out of order.
+            time.sleep(self.delay * (1 + (3 - int(clip.topic_title.split()[-1])) % 3))
+            if clip.topic_title in self.fail_titles:
+                raise ExternalToolError(f"boom on {clip.topic_title}")
+            for out in outputs:
+                out.write_bytes(f"{clip.topic_title}|{extra_filter is not None}".encode())
+        finally:
+            with self.lock:
+                self._running -= 1
+        with self.lock:
+            self.finished.append(clip.topic_title)
+
+
+def _many_clips(job: Job, n: int = 8) -> Job:
+    _job_with_video(job)
+    job.write_clips([ClipSpec.between(f"Clip {i}", 5.0 * i, 5.0 * i + 4) for i in range(n)])
+    return job
+
+
+def _workers(workers: int | None, **sections) -> PipelineConfig:
+    return PipelineConfig(clip=ClipConfig(max_workers=workers), **sections)
+
+
+def _remote(job: Job) -> RemoteVideo:
+    job.input_video.unlink(missing_ok=True)
+    job.input_audio.write_bytes(b"audio")
+    return RemoteVideo(url="https://v", audio=job.input_audio, width=1920, height=1080)
+
+
+def test_auto_workers_local_vs_remote(monkeypatch, tmp_path):
+    remote = RemoteVideo(url="https://v", audio=tmp_path / "a.m4a", width=1920, height=1080)
+    local = tmp_path / "input.mp4"
+    monkeypatch.setattr(clip_module.os, "cpu_count", lambda: 10)
+    assert clip_workers(ClipConfig(), local) == 1, "one libx264 already uses every core"
+    assert clip_workers(ClipConfig(), remote) == 4, "remote cuts wait on the network"
+    for explicit in (1, 3, 8):  # an explicit number always wins
+        assert clip_workers(ClipConfig(max_workers=explicit), local) == explicit
+        assert clip_workers(ClipConfig(max_workers=explicit), remote) == explicit
+    monkeypatch.setattr(clip_module.os, "cpu_count", lambda: 2)
+    assert clip_workers(ClipConfig(), remote) == 2
+    monkeypatch.setattr(clip_module.os, "cpu_count", lambda: None)
+    assert clip_workers(ClipConfig(), remote) == 1
+
+
+def test_stage_auto_workers_are_sequential_locally_and_parallel_remotely(job_copy):
+    job = _many_clips(job_copy, 6)
+    local = SlowClipper()
+    ClipStage(clipper=local).run(job, _no_captions())
+    assert local.peak == 1
+
+    remote_job = _many_clips(job_copy, 6)
+    remote = _remote(remote_job)
+    clipper = SlowClipper()
+    ClipStage(clipper=clipper, source=lambda j: remote, force=True).run(remote_job, _no_captions())
+    assert clipper.peak > 1
+
+
+def test_parallel_matches_sequential(job_copy, tmp_path):
+    """Same clips, caption tracks and manifest whatever the worker count."""
+    results = []
+    for workers in (1, 4):
+        job = Job(tmp_path / f"job-{workers}")
+        shutil.copytree(job_copy.root, job.root)
+        _many_clips(job)
+        clipper = SlowClipper()
+        ClipStage(clipper=clipper).run(job, _workers(workers))
+        if workers > 1:
+            assert clipper.peak > 1
+        files = {p.name: p.read_bytes() for p in job.clips_dir.iterdir()}
+        results.append((files, json.loads((job.clips_dir / MANIFEST).read_text())))
+    assert results[0] == results[1]
+    files, manifest = results[0]
+    assert len(manifest) == 8 and len([n for n in files if n.endswith(".ass")]) == 8
+
+
+def test_parallel_crash_then_rerun_cuts_only_unfinished_clips(job_copy):
+    job = _many_clips(job_copy)
+    crashed = SlowClipper(fail_titles=frozenset({"Clip 3"}))
+    with pytest.raises(ExternalToolError, match="Clip 3"):
+        ClipStage(clipper=crashed).run(job, _workers(3))
+    assert "Clip 3" not in crashed.finished
+    assert not captions_path(_paths(job)[3]).exists(), "no .ass without its clip"
+    assert _leftovers(job.clips_dir) == []
+    manifest = json.loads((job.clips_dir / MANIFEST).read_text())
+    assert len(manifest) == len(crashed.finished), "every finished clip is recorded"
+
+    rerun = SlowClipper()
+    ClipStage(clipper=rerun).run(job, _workers(3))
+    every = {f"Clip {i}" for i in range(8)}
+    assert sorted(rerun.started) == sorted(every - set(crashed.finished))
+    assert all(p.exists() for p in _paths(job))
+
+
+def test_parallel_fails_fast(job_copy):
+    """After a failure, queued clips don't start; the earliest failed clip's error wins."""
+    job = _many_clips(job_copy, 12)
+    clipper = SlowClipper(fail_titles=frozenset({"Clip 1", "Clip 2"}))
+    with pytest.raises(ExternalToolError, match="Clip 1"):
+        ClipStage(clipper=clipper).run(job, _workers(2))
+    assert len(clipper.started) < 12, "queued clips were cancelled"
+    assert set(clipper.finished) <= set(clipper.started)
+
+
+def test_remote_source_is_resolved_once_with_several_workers(job_copy):
+    job = _many_clips(job_copy)
+    remote = _remote(job)
+    resolved = []
+    gate = threading.Barrier(4, timeout=5)
+
+    def source(j):
+        resolved.append(threading.current_thread().name)
+        time.sleep(0.05)  # a slow yt-dlp call: the workers must not each resolve
+        return remote
+
+    @dataclass
+    class GatedClipper(SlowClipper):
+        seen: list[object] = field(default_factory=list)
+
+        def __call__(self, video, clips, outputs, config, *, extra_filter=None) -> None:
+            self.seen.append(video)
+            if clips[0].topic_title in {f"Clip {i}" for i in range(4)}:
+                gate.wait()  # the first 4 clips really start together
+            super().__call__(video, clips, outputs, config, extra_filter=extra_filter)
+
+    clipper = GatedClipper()
+    ClipStage(clipper=clipper, source=source).run(job, _workers(4, caption=_off()))
+    assert resolved == [threading.current_thread().name], "once, in the stage thread"
+    assert clipper.seen == [remote] * 8
+    ClipStage(clipper=SlowClipper(), source=source).run(job, _workers(4, caption=_off()))
+    assert len(resolved) == 1, "nothing to cut: the stream isn't resolved"
+
+
+def _off() -> CaptionConfig:
+    return CaptionConfig(enabled=False)
+
+
+def test_parallel_progress_is_monotonic_and_ends_at_one(job_copy):
+    job = _many_clips(job_copy)
+    ClipStage(clipper=SlowClipper()).run(job, _workers(1))
+    for path in _paths(job)[::3]:  # some clips up to date, some to re-cut
+        path.unlink()
+    main = threading.current_thread()
+    reports: list[tuple[float, str, threading.Thread]] = []
+
+    def sink(fraction: float, detail: str) -> None:
+        reports.append((fraction, detail, threading.current_thread()))
+
+    with progress.capture(sink):
+        ClipStage(clipper=SlowClipper()).run(job, _workers(4))
+    fractions = [f for f, _, _ in reports]
+    assert fractions == sorted(fractions) and len(reports) == 8
+    assert reports[-1][:2] == (1.0, "clip 8/8")
+    assert {t for _, _, t in reports} == {main}, "reported from the stage thread"
+
+
+@pytest.mark.ffmpeg
+def test_real_ffmpeg_four_clips_on_two_workers(make_video, tmp_path):
+    job = Job(tmp_path / "job")
+    job.root.mkdir()
+    make_video(duration=9, name="src.mp4").replace(job.input_video)
+    job.write_clips([ClipSpec.between(f"Part {i}", 2.0 * i, 2.0 * i + 1.5) for i in range(4)])
+    ClipStage().run(job, _no_captions(clip=ClipConfig(max_workers=2)))
+    for spec, out in zip(job.read_clips(), _paths(job), strict=True):
+        info = probe(out)
+        assert (info.width, info.height) == TARGET
+        assert info.duration == pytest.approx(spec.duration, abs=0.1)
+    assert len(json.loads((job.clips_dir / MANIFEST).read_text())) == 4
+    assert _leftovers(job.clips_dir) == []

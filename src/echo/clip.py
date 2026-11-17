@@ -17,6 +17,11 @@ files from a previous ``clips.json`` that no longer belong to it are deleted.
 Reframing (#26) happens in the same encode: ``cut_clips`` asks ``echo.reframe`` for the
 ``-vf`` filter matching ``ClipConfig.aspect`` / ``background`` / ``crop_x`` (1080x1920 by
 default, none for ``aspect="source"``).
+
+Clips can be cut in parallel (#57, ``ClipConfig.max_workers``). By default that only
+happens for a link job's ``RemoteVideo``, where each cut mostly waits on ranged HTTP
+reads; on a local file one libx264 encode already uses every core, so parallel encodes
+barely help (see ``clip_workers``).
 """
 
 from __future__ import annotations
@@ -25,7 +30,9 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
@@ -168,6 +175,21 @@ def cut_clips(
 
 _: Clipper = cut_clips
 
+REMOTE_WORKERS = 4
+"""Remote clips cut at once by default (``ClipConfig.max_workers=None``)."""
+
+
+def clip_workers(config: ClipConfig, video: Path | RemoteVideo) -> int:
+    """Clips cut at once: ``config.max_workers`` if set. Otherwise 1 for a local video
+    (one libx264 encode already keeps every core busy: 4 workers saved ~10 %, #57) and
+    ``min(REMOTE_WORKERS, cpu_count)`` for a ``RemoteVideo``, whose cuts mostly wait on
+    the network."""
+    if config.max_workers is not None:
+        return config.max_workers
+    if isinstance(video, RemoteVideo):
+        return max(1, min(REMOTE_WORKERS, os.cpu_count() or 1))
+    return 1
+
 
 MANIFEST = "manifest.json"
 """``clips/manifest.json``: ``{file name: {"clip": ..., "config": ..., "captions": ...}}``
@@ -257,15 +279,6 @@ class ClipStage:
         if not (job.input_video.is_file() or job.input_audio.is_file()):
             raise ArtifactError(f"missing artifact: {job.input_video}")
         clips = job.read_clips()
-        resolved: list[Path | RemoteVideo] = []
-
-        def video() -> Path | RemoteVideo:
-            # Resolved once, on the first clip that needs cutting: a link job's stream
-            # URL is only fetched when there's work to do (and it expires anyway).
-            if not resolved:
-                resolved.append(self.source(job))
-            return resolved[0]
-
         paths = clip_paths(job, clips)
         job.clips_dir.mkdir(parents=True, exist_ok=True)
         manifest = {k: v for k, v in _read_manifest(job).items() if (job.clips_dir / k).exists()}
@@ -280,40 +293,64 @@ class ClipStage:
         colour_speakers = burn and config.diarize.enabled and job.speakers_path.is_file()
         speakers = job.read_speakers() if colour_speakers else None
 
-        def clip_done(done: int) -> None:  # skipped (up-to-date) clips count as done
+        done = 0
+
+        def clip_done() -> None:  # skipped (up-to-date) clips count as done
+            nonlocal done
+            done += 1
             progress.report(done / len(clips), f"clip {done}/{len(clips)}")
 
-        for done, (clip, path) in enumerate(zip(clips, paths, strict=True), start=1):
+        todo: list[_Cut] = []
+        for clip, path in zip(clips, paths, strict=True):
             ass = build_ass(transcript, clip, style, speakers) if transcript is not None else None
             entry = _entry(clip, config.clip, ass)
             if not self.force and path.exists() and manifest.get(path.name) == entry:
-                clip_done(done)
+                clip_done()
                 continue
             manifest.pop(path.name, None)
-            ass_path = captions_path(path)
-            if ass is None:
-                ass_path.unlink(missing_ok=True)
-                self.clipper(video(), [clip], [path], config.clip)
+            todo.append(_Cut(clip, path, entry, ass))
+
+        if todo:
+            # Resolved once, here in the stage thread (so a fallback download's progress
+            # reaches the CLI), and only when there's work: a link job's stream URL is
+            # only fetched when needed (and it expires anyway).
+            video = self.source(job)
+            lock = threading.Lock()  # guards ``manifest`` across workers
+
+            def cut(item: _Cut) -> None:
+                ass_path = captions_path(item.path)
+                if item.ass is None:
+                    ass_path.unlink(missing_ok=True)
+                    self.clipper(video, [item.clip], [item.path], config.clip)
+                else:
+                    # Burn from a temp file and move it into place only once the clip is
+                    # cut, so a failed encode never leaves a .ass that doesn't match its .mp4.
+                    tmp = ass_path.with_name(f".{ass_path.name}.tmp")
+                    tmp.write_bytes(item.ass.encode("utf-8-sig"))  # BOM: libass reads it anywhere
+                    try:
+                        self.clipper(
+                            video,
+                            [item.clip],
+                            [item.path],
+                            config.clip,
+                            extra_filter=subtitles_filter(tmp),
+                        )
+                        os.replace(tmp, ass_path)
+                    except BaseException:
+                        tmp.unlink(missing_ok=True)
+                        raise
+                with lock:
+                    manifest[item.path.name] = item.entry
+                    # After every clip, so a crash only loses the clips still being cut.
+                    _write_manifest(job, manifest)
+
+            workers = min(clip_workers(config.clip, video), len(todo))
+            if workers == 1:
+                for item in todo:
+                    cut(item)
+                    clip_done()
             else:
-                # Burn from a temp file and move it into place only once the clip is cut,
-                # so a failed encode never leaves a .ass that doesn't match its .mp4.
-                tmp = ass_path.with_name(f".{ass_path.name}.tmp")
-                tmp.write_bytes(ass.encode("utf-8-sig"))  # BOM: libass reads it anywhere
-                try:
-                    self.clipper(
-                        video(),
-                        [clip],
-                        [path],
-                        config.clip,
-                        extra_filter=subtitles_filter(tmp),
-                    )
-                    os.replace(tmp, ass_path)
-                except BaseException:
-                    tmp.unlink(missing_ok=True)
-                    raise
-            manifest[path.name] = entry
-            _write_manifest(job, manifest)  # after every clip, so a crash loses at most one
-            clip_done(done)
+                _run_parallel(cut, todo, workers, clip_done)
 
         # Delete clips written for a previous clips.json that are no longer wanted.
         for name in set(manifest) - {p.name for p in paths}:
@@ -321,6 +358,50 @@ class ClipStage:
             captions_path(job.clips_dir / name).unlink(missing_ok=True)
             del manifest[name]
         _write_manifest(job, manifest)
+
+
+@dataclass(frozen=True)
+class _Cut:
+    """A clip ``ClipStage.run`` has to (re-)cut."""
+
+    clip: ClipSpec
+    path: Path
+    entry: dict[str, str]
+    ass: str | None
+
+
+def _run_parallel(
+    cut: Callable[[_Cut], None],
+    todo: list[_Cut],
+    workers: int,
+    on_done: Callable[[], None],
+) -> None:
+    """Run ``cut`` for every clip on ``workers`` threads (each one waits on an ffmpeg).
+
+    ``on_done`` is called here, in the calling (stage) thread, as each clip finishes:
+    ``echo.progress`` doesn't reach pool threads. The first failure stops new clips
+    from starting; clips already being cut finish and keep their manifest entries, then
+    the error of the earliest failed clip (in ``todo`` order) is raised.
+    """
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="clip") as pool:
+        futures: list[Future[None]] = [pool.submit(cut, item) for item in todo]
+        try:
+            for future in as_completed(futures):
+                if future.cancelled():
+                    continue
+                if future.exception() is None:
+                    on_done()
+                else:
+                    for queued in futures:
+                        queued.cancel()  # no-op for clips already being cut
+        except BaseException:  # e.g. Ctrl-C: don't start the queued clips
+            for queued in futures:
+                queued.cancel()
+            raise
+    for future in futures:
+        error = None if future.cancelled() else future.exception()
+        if error is not None:
+            raise error
 
 
 def _read_manifest(job: Job) -> dict[str, dict[str, str]]:
