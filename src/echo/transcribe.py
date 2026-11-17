@@ -7,6 +7,7 @@ so they must be stable for a given transcript.
 from __future__ import annotations
 
 import logging
+import math
 import wave
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -32,6 +33,31 @@ class _WhisperLike(Protocol):
 
 
 ModelFactory = Callable[[TranscribeConfig], _WhisperLike]
+PipelineFactory = Callable[[_WhisperLike], _WhisperLike]
+"""Wraps a loaded model in the batched pipeline (``TranscribeConfig.batch_size > 0``)."""
+
+
+def _batched_pipeline(model: _WhisperLike) -> _WhisperLike:
+    from faster_whisper import BatchedInferencePipeline
+
+    return BatchedInferencePipeline(model)  # type: ignore[arg-type]
+
+
+CHUNK_SECONDS = 30
+"""Whisper's input window; the batched pipeline decodes chunks of at most this length."""
+
+
+def fixed_chunks(n_samples: int, rate: int = 16_000) -> list[dict[str, float]]:
+    """Back-to-back ``CHUNK_SECONDS`` windows covering the audio, in seconds.
+
+    The batched pipeline needs chunk boundaries: from VAD, or these when VAD is off.
+    Empty audio gives none (faster-whisper then decodes it as one short chunk).
+    """
+    duration = n_samples / rate
+    return [
+        {"start": float(i * CHUNK_SECONDS), "end": min(float((i + 1) * CHUNK_SECONDS), duration)}
+        for i in range(math.ceil(duration / CHUNK_SECONDS))
+    ]
 
 
 # Approximate download sizes, for the one-line first-run notice.
@@ -120,15 +146,22 @@ def _clamp(value: float, low: float, high: float) -> float:
 class WhisperTranscriber:
     """Implements ``echo.interfaces.Transcriber`` with faster-whisper.
 
-    The model is loaded on first use and reused. ``model_factory`` exists for tests.
+    The model is loaded on first use and reused. With ``batch_size > 0`` it runs through
+    faster-whisper's ``BatchedInferencePipeline``, which decodes several ~30 s chunks at
+    once (#58). ``model_factory`` and ``pipeline_factory`` exist for tests.
     """
 
     def __init__(
-        self, config: TranscribeConfig, *, model_factory: ModelFactory = _load_whisper
+        self,
+        config: TranscribeConfig,
+        *,
+        model_factory: ModelFactory = _load_whisper,
+        pipeline_factory: PipelineFactory = _batched_pipeline,
     ) -> None:
         self.config = config
         self.model_name = f"faster-whisper/{config.model_size}"
         self._model_factory = model_factory
+        self._pipeline_factory = pipeline_factory
         self._model: _WhisperLike | None = None
 
     def transcribe(self, audio: Path) -> Transcript:
@@ -160,11 +193,26 @@ class WhisperTranscriber:
             ) from e
 
     def _run(self, samples: np.ndarray) -> Transcript:
+        config = self.config
         if self._model is None:
-            self._model = self._model_factory(self.config)
-        raw_segments, info = self._model.transcribe(
-            samples, language=self.config.language, word_timestamps=True
-        )
+            model = self._model_factory(config)
+            self._model = self._pipeline_factory(model) if config.batch_size else model
+        kwargs: dict[str, Any] = {
+            "language": config.language,
+            "word_timestamps": True,
+            "vad_filter": config.vad_filter,
+        }
+        if config.vad_filter and config.vad_min_silence_ms is not None:
+            kwargs["vad_parameters"] = {"min_silence_duration_ms": config.vad_min_silence_ms}
+        if config.batch_size:
+            kwargs["batch_size"] = config.batch_size
+            # The batched pipeline defaults to one segment per ~30 s chunk; refine and the
+            # LLM need sentence-sized segments like the sequential decoder gives.
+            kwargs["without_timestamps"] = False
+            if not config.vad_filter:
+                # Without VAD the batched pipeline has no chunk boundaries of its own.
+                kwargs["clip_timestamps"] = fixed_chunks(len(samples))
+        raw_segments, info = self._model.transcribe(samples, **kwargs)
         # Segments are a lazy generator: decoding happens while iterating.
         return self._build(list(raw_segments), language=info.language, duration=info.duration)
 

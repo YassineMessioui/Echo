@@ -156,6 +156,15 @@ Every platform needs its own developer app and OAuth credentials. Check each one
 
 The Whisper model (`small` by default) downloads on the first run.
 
+**Optional: NVIDIA GPU.** Transcription uses the GPU when one is present and its CUDA libraries load; otherwise it runs on the CPU (with one warning line). faster-whisper needs **cuBLAS for CUDA 12** and **cuDNN 9**:
+- **Linux:** `uv pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"`, then put their `lib` folders on `LD_LIBRARY_PATH`:
+  ```bash
+  export LD_LIBRARY_PATH=$(.venv/bin/python -c 'import os, nvidia.cublas.lib, nvidia.cudnn.lib; print(os.path.dirname(nvidia.cublas.lib.__file__) + ":" + os.path.dirname(nvidia.cudnn.lib.__file__))')
+  ```
+- **Windows:** install the [CUDA Toolkit 12](https://developer.nvidia.com/cuda-downloads) and [cuDNN 9](https://developer.nvidia.com/cudnn-downloads) and make sure their `bin` folders are on `PATH` (`cublas64_12.dll`, `cudnn64_9.dll`).
+
+Silence and music are skipped by voice activity detection (`TranscribeConfig.vad_filter`). On a GPU, `TranscribeConfig.batch_size = 8` decodes several ~30 s chunks at once; on a CPU it is about 2× faster but less accurate than a smaller model, so it is off by default (benchmarks in #58).
+
 ### Setup
 
 ```bash
