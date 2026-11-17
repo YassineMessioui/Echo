@@ -27,6 +27,7 @@ from echo.clip import clip_paths
 from echo.config import (
     CaptionConfig,
     ClipConfig,
+    DiarizeConfig,
     IngestConfig,
     LLMConfig,
     PipelineConfig,
@@ -191,6 +192,7 @@ def _build_config(
     refine: dict[str, Any],
     clip: dict[str, Any],
     caption: dict[str, Any],
+    diarize: dict[str, Any] | None = None,
 ) -> PipelineConfig:
     """Overlay the CLI values on the defaults, validating every section.
 
@@ -210,6 +212,7 @@ def _build_config(
                 "refine": RefineConfig.model_validate(_D.refine.model_dump() | refine),
                 "clip": ClipConfig.model_validate(_D.clip.model_dump() | clip),
                 "caption": CaptionConfig.model_validate(_D.caption.model_dump() | caption),
+                "diarize": DiarizeConfig.model_validate(_D.diarize.model_dump() | (diarize or {})),
             }
         )
     except ValidationError as e:
@@ -414,6 +417,20 @@ def run(
     captions: Annotated[
         bool, typer.Option("--captions/--no-captions", help="Burn word-highlighted captions in.")
     ] = _D.caption.enabled,
+    speakers: Annotated[
+        bool,
+        typer.Option(
+            "--speakers/--no-speakers",
+            help="Detect who speaks when (speaker diarization, ~5 min per hour of audio); "
+            "captions get a colour per speaker.",
+        ),
+    ] = _D.diarize.enabled,
+    num_speakers: Annotated[
+        int | None,
+        typer.Option(
+            min=1, help="How many speakers there are (default: estimate).", show_default=False
+        ),
+    ] = _D.diarize.num_speakers,
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Debug logging and full tracebacks.")
     ] = False,
@@ -436,6 +453,7 @@ def run(
         },
         clip={"aspect": aspect.value, "crop_x": crop_x, "background": background.value},
         caption={"enabled": captions},
+        diarize={"enabled": speakers, "num_speakers": num_speakers},
     )
     _check_captions_supported(config)
 

@@ -43,6 +43,7 @@ from pathlib import Path
 from echo import progress
 from echo.clip import ClipStage
 from echo.config import LLMConfig, PipelineConfig, TranscribeConfig
+from echo.diarize import DiarizeStage, SherpaDiarizer
 from echo.errors import EchoError
 from echo.ingest import IngestStage
 from echo.interfaces import Stage
@@ -102,9 +103,14 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
     their stage actually runs, so a resumed or partly-skipped run doesn't load them.
     """
     extractor = _LazyTopicExtractor(config.llm)
-    return [
+    stages: list[Stage] = [
         IngestStage(),
         TranscribeStage(_LazyTranscriber(config.transcribe)),
+    ]
+    if config.diarize.enabled:  # optional (#22); its models load only when it runs
+        stages.append(DiarizeStage(SherpaDiarizer(config.diarize)))
+    return [
+        *stages,
         LLMStage(WindowChunker(llm=config.llm), extractor, models=_LLMModels(extractor)),
         RefineStage(),
         ClipStage(),

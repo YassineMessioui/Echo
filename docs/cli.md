@@ -36,6 +36,8 @@ resumes that job instead of downloading it again. YouTube needs a JavaScript run
 | `--crop-x FLOAT` | `0.5` | `ClipConfig.crop_x` (0 = left, 1 = right) |
 | `--background [blur\|black]` | `blur` | `ClipConfig.background` |
 | `--captions / --no-captions` | on | `CaptionConfig.enabled` (burned-in, word-highlighted) |
+| `--speakers / --no-speakers` | off | `DiarizeConfig.enabled`: detect who speaks when (`speakers.json`); captions get a colour per speaker. Adds ~5 min of CPU per hour of audio; the models (~46 MB) download once to `~/.cache/echo/models` (`ECHO_MODELS_DIR`) |
+| `--num-speakers N` | estimate | `DiarizeConfig.num_speakers` |
 | `-v, --verbose` | off | debug logging |
 
 Option defaults come from `PipelineConfig`, so the two can't drift. Hosted LLM providers

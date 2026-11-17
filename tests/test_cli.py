@@ -456,3 +456,26 @@ def test_tty_output_is_throttled_and_cleared_before_the_final_line(capsys):
     written = capsys.readouterr().out
     assert written.count("\r[3/5] llm") == 5
     assert written.endswith("\r\x1b[K[3/5] llm         done      0.5s\n")
+
+
+def test_speakers_flags(fake, video, jobs_dir):
+    assert run(video, jobs_dir).exit_code == 0
+    assert fake.config.diarize.enabled is False
+    result = run(video, jobs_dir, "--speakers", "--num-speakers", "2")
+    assert result.exit_code == 0, result.output
+    assert fake.config.diarize.enabled is True and fake.config.diarize.num_speakers == 2
+    assert run(video, jobs_dir, "--num-speakers", "0").exit_code == 2
+
+
+def test_stage_numbering_follows_the_built_stages(fake, video, jobs_dir, monkeypatch):
+    """With --speakers, diarize is stage 3 of 6; without it, there are 5 stages."""
+    from types import SimpleNamespace
+
+    names = [StageName.INGEST, StageName.TRANSCRIBE, StageName.DIARIZE, StageName.LLM]
+    monkeypatch.setattr(
+        fake, "build_stages", lambda config: [SimpleNamespace(name=n) for n in names]
+    )
+    monkeypatch.setattr(cli, "build_stages", fake.build_stages)
+    fake.events = [StageEvent(StageName.DIARIZE, StageStatus.DONE, elapsed=1.0)]
+    result = run(video, jobs_dir, "--speakers")
+    assert "[3/4] diarize     done      1.0s" in result.stdout
