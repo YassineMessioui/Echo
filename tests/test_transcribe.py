@@ -15,7 +15,7 @@ from echo.errors import ArtifactError, TranscriptionError
 from echo.job import Job
 from echo.models import Transcript
 from echo.testing import FakeTranscriber
-from echo.transcribe import TranscribeStage, WhisperTranscriber, load_wav
+from echo.transcribe import TranscribeStage, WhisperTranscriber, fixed_chunks, load_wav
 
 
 def _write_wav(
@@ -57,6 +57,16 @@ class FakeWhisperModel:
         return iter(self.segments), info
 
 
+@dataclass
+class FakeBatchedPipeline:
+    """Stands in for ``BatchedInferencePipeline``: records that the model was wrapped."""
+
+    model: FakeWhisperModel
+
+    def transcribe(self, audio: np.ndarray, **kwargs: Any):
+        return self.model.transcribe(audio, batched=True, **kwargs)
+
+
 def _transcriber(model: FakeWhisperModel, **config: Any) -> tuple[WhisperTranscriber, list]:
     loaded: list[TranscribeConfig] = []
 
@@ -64,7 +74,10 @@ def _transcriber(model: FakeWhisperModel, **config: Any) -> tuple[WhisperTranscr
         loaded.append(cfg)
         return model
 
-    return WhisperTranscriber(TranscribeConfig(**config), model_factory=factory), loaded
+    transcriber = WhisperTranscriber(
+        TranscribeConfig(**config), model_factory=factory, pipeline_factory=FakeBatchedPipeline
+    )
+    return transcriber, loaded
 
 
 @pytest.fixture
@@ -94,7 +107,7 @@ def test_transcribes_with_word_timestamps_and_sequential_ids(audio: Path):
 
     ((samples, kwargs),) = model.calls
     assert samples.dtype == np.float32 and samples.shape == (8000,)
-    assert kwargs == {"language": "en", "word_timestamps": True}
+    assert kwargs == {"language": "en", "word_timestamps": True, "vad_filter": True}
 
 
 def test_model_config_and_name(audio: Path):
@@ -220,6 +233,106 @@ def test_stage_requires_audio(job_copy: Job, golden_job: Job):
         stage.run(job_copy, PipelineConfig())
 
 
+# --- batched pipeline + VAD (#58) ------------------------------------------------------
+
+
+def test_batched_mode_wraps_the_model_and_asks_for_segment_timestamps(audio: Path):
+    model = FakeWhisperModel([_segment(0.0, 1.0, "hi")])
+    transcriber, loaded = _transcriber(model, batch_size=8)
+    transcriber.transcribe(audio)
+    transcriber.transcribe(audio)
+    assert len(loaded) == 1, "model (and pipeline) built once"
+    assert model.calls[0][1] == {
+        "language": None,
+        "word_timestamps": True,
+        "vad_filter": True,
+        "batch_size": 8,
+        "without_timestamps": False,  # sentence-sized segments, not one per 30 s chunk
+        "batched": True,
+    }
+
+
+def test_batched_mode_keeps_the_transcript_contract(audio: Path):
+    model = FakeWhisperModel(
+        [
+            _segment(0.0, 29.8, " first chunk", [_word(0.0, 0.5, " first")]),
+            _segment(29.5, 31.0, " overlaps it", [_word(29.6, 30.0, " overlaps")]),
+            _segment(31.0, 31.0, " "),
+            _segment(31.0, 35.0, " third", [_word(31.2, 31.6, " third")]),
+        ],
+        duration=40.0,
+    )
+    transcriber, _ = _transcriber(model, batch_size=16)
+    transcript = transcriber.transcribe(audio)
+    assert model.calls[0][1]["batched"] and model.calls[0][1]["batch_size"] == 16
+    assert [s.id for s in transcript.segments] == [0, 1, 2]
+    starts = [s.start for s in transcript.segments]
+    assert starts == sorted(starts)
+    assert all(s.words for s in transcript.segments)
+
+
+def test_batched_without_vad_passes_fixed_30s_chunks(tmp_path: Path):
+    audio = _write_wav(tmp_path / "long.wav", seconds=65)
+    model = FakeWhisperModel([])
+    transcriber, _ = _transcriber(model, batch_size=8, vad_filter=False)
+    transcriber.transcribe(audio)
+    ((_, kwargs),) = model.calls
+    assert kwargs["vad_filter"] is False
+    assert kwargs["clip_timestamps"] == [
+        {"start": 0.0, "end": pytest.approx(65 / 3)},
+        {"start": pytest.approx(65 / 3), "end": pytest.approx(130 / 3)},
+        {"start": pytest.approx(130 / 3), "end": 65.0},
+    ]
+
+
+def test_vad_min_silence_is_passed_only_with_vad(audio: Path):
+    model = FakeWhisperModel([])
+    transcriber, _ = _transcriber(model, vad_min_silence_ms=500)  # sequential default
+    transcriber.transcribe(audio)
+    assert model.calls[-1][1]["vad_parameters"] == {"min_silence_duration_ms": 500}
+
+    model = FakeWhisperModel([])
+    transcriber, _ = _transcriber(model, vad_filter=False, vad_min_silence_ms=500)
+    transcriber.transcribe(audio)
+    assert "vad_parameters" not in model.calls[-1][1]
+
+
+def test_fixed_chunks_short_and_exact_lengths():
+    assert fixed_chunks(16_000 * 10) == [{"start": 0.0, "end": 10.0}]
+    assert fixed_chunks(16_000 * 60) == [{"start": 0.0, "end": 30.0}, {"start": 30.0, "end": 60.0}]
+    assert fixed_chunks(0) == []
+    tail = fixed_chunks(int(16_000 * 60.05))  # no 50 ms last chunk
+    assert len(tail) == 3 and min(c["end"] - c["start"] for c in tail) > 20
+    assert tail[-1]["end"] == pytest.approx(60.05)
+    assert all(a["end"] == b["start"] for a, b in zip(tail, tail[1:], strict=False))
+
+
+def test_batched_cpu_fallback_rewraps_the_cpu_model(audio: Path):
+    good = FakeWhisperModel([_segment(0.0, 1.0, "ok")])
+
+    class NoCuda:
+        def transcribe(self, audio, **kwargs):
+            raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+
+    wrapped: list[object] = []
+
+    def pipeline(model):
+        wrapped.append(model)
+        return FakeBatchedPipeline(model) if model is good else model
+
+    def factory(cfg: TranscribeConfig):
+        return NoCuda() if cfg.device == "auto" else good
+
+    transcriber = WhisperTranscriber(
+        TranscribeConfig(device="auto", batch_size=8),
+        model_factory=factory,
+        pipeline_factory=pipeline,
+    )
+    assert [s.text for s in transcriber.transcribe(audio).segments] == ["ok"]
+    assert len(wrapped) == 2 and wrapped[1] is good, "the CPU model is wrapped again"
+    assert good.calls[0][1]["batched"], "and still runs batched"
+
+
 # --- real model (opt-in: uv run pytest -m model) -------------------------------------------
 
 
@@ -240,6 +353,31 @@ def test_real_whisper_model(tmp_path: Path):
     if "ECHO_TEST_AUDIO" in os.environ:
         assert transcript.segments, "expected speech in ECHO_TEST_AUDIO"
         assert any(s.words for s in transcript.segments)
+
+
+@pytest.mark.model
+@pytest.mark.ffmpeg
+def test_real_batched_pipeline_on_fixture_podcast(tmp_path: Path):
+    """Batched + VAD on the fixture podcast: real speech, words, contract intact."""
+    from echo.config import IngestConfig
+    from echo.ingest import extract_audio
+
+    video = Path(__file__).parent / "fixtures" / "podcast" / "podcast.mp4"
+    wav = tmp_path / "audio.wav"
+    extract_audio(video, wav, IngestConfig())
+    config = TranscribeConfig(
+        model_size=os.environ.get("ECHO_TEST_WHISPER", "tiny"), device="cpu", batch_size=8
+    )
+    transcript = WhisperTranscriber(config).transcribe(wav)
+
+    segments = transcript.segments
+    assert len(segments) > 5
+    assert [s.id for s in segments] == list(range(len(segments)))
+    assert [s.start for s in segments] == sorted(s.start for s in segments)
+    assert all(s.words for s in segments)
+    assert segments[-1].end > 0.8 * transcript.duration, "VAD kept the speech to the end"
+    text = " ".join(s.text for s in segments).lower()
+    assert "caffeine" in text and "bicycle" in text
 
 
 # --- first run on Windows (#65) ---------------------------------------------------------
@@ -289,7 +427,9 @@ def test_auto_device_falls_back_to_cpu_without_cuda_libraries(audio: Path):
         devices.append(cfg.device)
         return NoCuda() if cfg.device == "auto" else good
 
-    transcriber = WhisperTranscriber(TranscribeConfig(device="auto"), model_factory=factory)
+    transcriber = WhisperTranscriber(
+        TranscribeConfig(device="auto", batch_size=0), model_factory=factory
+    )
     transcript = transcriber.transcribe(audio)
     assert [s.text for s in transcript.segments] == ["hello"]
     assert devices == ["auto", "cpu"]
@@ -322,7 +462,9 @@ def test_real_gpu_errors_do_not_fall_back(audio: Path, message: str):
         devices.append(cfg.device)
         raise RuntimeError(message)
 
-    transcriber = WhisperTranscriber(TranscribeConfig(device="auto"), model_factory=factory)
+    transcriber = WhisperTranscriber(
+        TranscribeConfig(device="auto", batch_size=0), model_factory=factory
+    )
     with pytest.raises(TranscriptionError, match=message.split(" with ")[0]):
         transcriber.transcribe(audio)
     assert devices == ["auto"]
@@ -346,7 +488,9 @@ def test_missing_gpu_stack_falls_back(audio: Path, message: str):
             raise RuntimeError(message)
         return good
 
-    transcriber = WhisperTranscriber(TranscribeConfig(device="auto"), model_factory=factory)
+    transcriber = WhisperTranscriber(
+        TranscribeConfig(device="auto", batch_size=0), model_factory=factory
+    )
     assert [s.text for s in transcriber.transcribe(audio).segments] == ["ok"]
 
 
@@ -360,7 +504,7 @@ def test_cpu_fallback_resets_float16_compute_type(audio: Path):
             raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
         return good
 
-    config = TranscribeConfig(device="auto", compute_type="float16")
+    config = TranscribeConfig(device="auto", compute_type="float16", batch_size=0)
     WhisperTranscriber(config, model_factory=factory).transcribe(audio)
     assert seen == [("auto", "float16"), ("cpu", "default")]
 
@@ -371,6 +515,8 @@ def test_failed_cpu_retry_keeps_the_cuda_error(audio: Path):
             raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
         raise RuntimeError("disk full")
 
-    transcriber = WhisperTranscriber(TranscribeConfig(device="auto"), model_factory=factory)
+    transcriber = WhisperTranscriber(
+        TranscribeConfig(device="auto", batch_size=0), model_factory=factory
+    )
     with pytest.raises(TranscriptionError, match=r"(?s)cublas64_12\.dll.*disk full"):
         transcriber.transcribe(audio)
