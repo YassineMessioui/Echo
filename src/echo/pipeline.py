@@ -23,8 +23,9 @@ Behaviour of ``run_pipeline``:
 - A stage may define ``settings(config) -> str | None``, a fingerprint of the settings
   its outputs depend on. It's recorded in ``job.json`` (``StageRecord.settings``), and a
   stage whose fingerprint changed re-runs even though its outputs exist (and so forces
-  the later stages). A job recorded before a stage had settings keeps its outputs and
-  adopts the current fingerprint.
+  the later stages). A failed re-run keeps the old fingerprint, so it's retried next
+  time. A job recorded before a stage had settings keeps its outputs and adopts the
+  current fingerprint, but only if that stage last finished (done or skipped).
 - While a stage runs, its ``echo.progress.report(fraction, detail)`` calls become
   ``RUNNING`` events with ``progress`` / ``detail`` (non-decreasing, ending at 1.0).
 """
@@ -200,28 +201,39 @@ def run_pipeline(
         forced = force or order.index(name) >= first_forced
         started = datetime.now(UTC)
         t0 = time.perf_counter()
+        last = job.read_meta().stages[name]
+        # The fingerprint of the outputs on disk. It's kept through RUNNING / FAILED, so a
+        # re-run that fails can't make old outputs look current on the next run.
+        kept = last.settings
         try:
             settings = _settings(stage, config)
-            previous = job.read_meta().stages[name].settings
-            changed = settings is not None and previous is not None and settings != previous
+            changed = settings is not None and (
+                settings != kept
+                if kept is not None
+                # Unknown provenance: only a finished stage may adopt the current settings;
+                # after a failed or interrupted run, its outputs can't be trusted.
+                else last.status in (StageStatus.RUNNING, StageStatus.FAILED)
+            )
             if not forced and not changed and all(p.exists() for p in stage.outputs(job)):
                 _record_skipped(job, name, started, settings)
                 emit(StageEvent(name, StageStatus.SKIPPED))
                 continue
             if (forced or changed) and _has_force_field(stage):
                 stage = dataclasses.replace(stage, force=True)
-            _record(job, name, StageRecord(status=StageStatus.RUNNING, started_at=started))
+            running = StageRecord(status=StageStatus.RUNNING, started_at=started, settings=kept)
+            _record(job, name, running)
             emit(StageEvent(name, StageStatus.RUNNING))
             with progress.capture(_progress_sink(name, emit)):
                 stage.run(job, config)
         except EchoError as e:
-            _fail(job, name, started, t0, str(e), emit)
+            _fail(job, name, started, t0, str(e), emit, kept)
             raise PipelineError(name, e) from e
         except KeyboardInterrupt:
-            _fail(job, name, started, t0, "interrupted", emit)
+            _fail(job, name, started, t0, "interrupted", emit, kept)
             raise
         except BaseException as e:  # a bug: record it, then let it propagate
-            _fail(job, name, started, t0, f"{type(e).__name__}: {e}".removesuffix(": "), emit)
+            error = f"{type(e).__name__}: {e}".removesuffix(": ")
+            _fail(job, name, started, t0, error, emit, kept)
             raise
         done = StageRecord(
             status=StageStatus.DONE,
@@ -297,9 +309,14 @@ def _fail(
     t0: float,
     error: str,
     emit: Callable[[StageEvent], None],
+    settings: str | None = None,
 ) -> None:
     record = StageRecord(
-        status=StageStatus.FAILED, started_at=started, finished_at=datetime.now(UTC), error=error
+        status=StageStatus.FAILED,
+        started_at=started,
+        finished_at=datetime.now(UTC),
+        error=error,
+        settings=settings,
     )
     _record(job, name, record)
     emit(StageEvent(name, StageStatus.FAILED, elapsed=time.perf_counter() - t0, error=error))

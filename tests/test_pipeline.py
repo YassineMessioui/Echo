@@ -400,3 +400,36 @@ def test_progress_outside_a_run_is_a_no_op() -> None:
     from echo import progress
 
     progress.report(0.5, "nobody listening")  # must not raise
+
+
+def test_failed_rerun_after_a_settings_change_is_retried(job: Job) -> None:
+    """Change settings → the re-run fails → the next run must re-run, not adopt."""
+    log: list[StageName] = []
+    stages = fake_stages(log)
+    stages[1] = SettingsStage(StageName.TRANSCRIBE, log, value="small")
+    run_pipeline(job, stages, CONFIG)
+
+    stages[1] = SettingsStage(StageName.TRANSCRIBE, log, value="medium", error=EchoError("GPU"))
+    with pytest.raises(PipelineError):
+        run_pipeline(job, stages, CONFIG)
+    record = job.read_meta().stages[StageName.TRANSCRIBE]
+    assert record.status is StageStatus.FAILED and record.settings == "small"
+
+    stages[1] = SettingsStage(StageName.TRANSCRIBE, log, value="medium")
+    log.clear()
+    run_pipeline(job, stages, CONFIG)
+    assert log[0] == StageName.TRANSCRIBE, "the old transcript is not adopted"
+    assert job.read_meta().stages[StageName.TRANSCRIBE].settings == "medium"
+
+
+def test_old_job_that_last_failed_does_not_adopt_settings(job: Job) -> None:
+    log: list[StageName] = []
+    stages = fake_stages(log)
+    run_pipeline(job, stages, CONFIG)  # outputs exist, recorded before settings existed
+    stages[1] = FakeStage(StageName.TRANSCRIBE, log, error=KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt):  # interrupted mid-transcribe: outputs suspect
+        run_pipeline(job, stages, CONFIG, from_stage=StageName.TRANSCRIBE)
+    stages[1] = SettingsStage(StageName.TRANSCRIBE, log, value="small")
+    log.clear()
+    run_pipeline(job, stages, CONFIG)
+    assert log[0] == StageName.TRANSCRIBE

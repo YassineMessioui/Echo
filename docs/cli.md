@@ -23,6 +23,7 @@ resumes that job instead of downloading it again. YouTube needs a JavaScript run
 | `--jobs-dir PATH` | `jobs` | `PipelineConfig.jobs_dir` |
 | `--force` | off | `run_pipeline(force=True)`: re-run every stage |
 | `--from-stage [ingest\|transcribe\|llm\|refine\|clip]` | none | `run_pipeline(from_stage=)`: re-run that stage and every later one |
+| `--range START:END` | whole video | `IngestConfig.start` / `end`: only process that part (see [Focus range](#focus-range)) |
 | `--whisper-model TEXT` | `small` | `TranscribeConfig.model_size` |
 | `--language TEXT` | auto-detect | `TranscribeConfig.language` |
 | `--llm-provider TEXT` | `ollama` | `LLMConfig.provider` (see [llm-providers.md](llm-providers.md)) |
@@ -40,6 +41,21 @@ Option defaults come from `PipelineConfig`, so the two can't drift. Hosted LLM p
 read their API key from the environment (e.g. `GROQ_API_KEY`); see
 [llm-providers.md](llm-providers.md).
 
+## Focus range
+
+`--range START:END` transcribes and searches only part of the video, e.g. to skip an
+intro and outro. Each side is seconds (`120`, `90.5`) or a percentage of the full
+duration (`15%`), and either may be left empty: `15%:85%`, `120:3300`, `:85%`, `10%:`.
+Ingest extracts only that span; the transcript records where it starts
+(`Transcript.offset`), so every timestamp, `clips.json` included, stays in
+original-video time and clips are cut from the original. `job.json` records the
+resolved span (`models.ingest_range`, in seconds), and changing `--range` on an existing
+job re-runs every stage from ingest.
+
+A malformed range (`abc`, `85%:15%`, `150%:`) exits with code 2. A range that only
+turns out wrong once the video's duration is known (past the end, or a mix of seconds and
+percent that ends up empty or inverted) fails the ingest stage with code 1.
+
 ## Output
 
 One line per stage while it runs, e.g.
@@ -50,7 +66,14 @@ One line per stage while it runs, e.g.
 ...
 ```
 
-then the job directory and the path of every clip. On failure it prints the stage and
+While a long stage runs (transcribe, llm, clip), a terminal shows one line redrawn in
+place with its percentage, detail and elapsed time, e.g.
+`[2/5] transcribe   42%  12:30 / 58:10  31.0s`, replaced by the stage's final line. When
+the output isn't a terminal (piped, redirected), the same line is printed plainly each
+time the stage passes another 10%, with no control characters. `--verbose` also uses the
+plain lines, since its log lines would break a line redrawn in place.
+
+At the end it prints the job directory and the path of every clip. On failure it prints the stage and
 error message (no traceback unless `--verbose`).
 
 ## Exit codes
@@ -70,4 +93,5 @@ echo-clips run "https://www.youtube.com/watch?v=VIDEO_ID" --llm-provider gemini
 echo-clips run episode.mp4 --job-id ep42 --from-stage refine --max-duration 45
 echo-clips run episode.mp4 --llm-provider groq --llm-model openai/gpt-oss-120b
 echo-clips run episode.mp4 --aspect source
+echo-clips run episode.mp4 --range 15%:85%
 ```

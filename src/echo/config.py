@@ -29,6 +29,12 @@ class IngestConfig(_Section):
         for value in (self.start, self.end):
             if value is not None and value.endswith("%") and float(value[:-1]) > 100:
                 raise ValueError(f"focus range {value!r} is over 100%")
+        # Same-unit pairs can be checked here; mixed units (seconds vs %) need the
+        # video's duration, so ingest checks those.
+        if self.start is not None and self.end is not None:
+            if self.start.endswith("%") == self.end.endswith("%"):
+                if float(self.start.rstrip("%")) >= float(self.end.rstrip("%")):
+                    raise ValueError(f"focus range {self.start}:{self.end} is empty or inverted")
         return self
 
 

@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import sys
+import time
 import traceback
+from collections.abc import Callable
 from enum import StrEnum
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -23,6 +27,7 @@ from echo.clip import clip_paths
 from echo.config import (
     CaptionConfig,
     ClipConfig,
+    IngestConfig,
     LLMConfig,
     PipelineConfig,
     RefineConfig,
@@ -125,9 +130,61 @@ def _check_captions_supported(config: PipelineConfig) -> None:
         raise typer.Exit(1)
 
 
+def _usage_error(message: str) -> typer.Exit:
+    # Typer 0.29 vendors Click and doesn't export UsageError; exit 2 like one.
+    typer.echo(f"Error: {message}", err=True)
+    return typer.Exit(2)
+
+
+def _normalise_point(point: str | None, *, is_end: bool) -> str | None:
+    """One spelling per point, so the same span keeps the same ingest fingerprint:
+    ``15.0%`` → ``15%``, ``0`` / ``0%`` start → none, ``100%`` end → none."""
+    if point is None:
+        return None
+    pct = point.endswith("%")
+    number = point.rstrip("%")
+    try:
+        value = float(number)
+    except ValueError:
+        return point  # malformed: IngestConfig reports it
+    if (value == 0 and not is_end) or (pct and value == 100 and is_end):
+        return None
+    text = str(int(value)) if value.is_integer() else repr(value)
+    return f"{text}%" if pct else text
+
+
+def parse_range(value: str | None) -> dict[str, str | None]:
+    """``--range START:END`` → ``IngestConfig`` ``start`` / ``end`` (either may be empty).
+
+    Each side is seconds (``120``) or a percentage (``15%``); ``IngestConfig`` validates
+    the forms. Two points of the same unit must be in order here; a mix of seconds and
+    percent is checked by the ingest stage, once the duration is known.
+    """
+    if value is None:
+        return {"start": None, "end": None}
+    start, sep, end = value.strip().partition(":")
+    start, end = start.strip() or None, end.strip() or None
+    if not sep or ":" in (end or "") or (start is None and end is None):
+        raise _usage_error(
+            f"invalid --range {value!r}: expected START:END, e.g. 15%:85%, 120:3300 or :85%"
+        )
+    start, end = _normalise_point(start, is_end=False), _normalise_point(end, is_end=True)
+    if start is None and end is None:
+        return {"start": None, "end": None}  # e.g. 0%:100%: the whole video
+    if start and end and start.endswith("%") == end.endswith("%"):
+        try:
+            inverted = float(start.rstrip("%")) >= float(end.rstrip("%"))
+        except ValueError:
+            inverted = False  # a malformed point: IngestConfig reports it
+        if inverted:
+            raise _usage_error(f"invalid --range {value!r}: START must be before END")
+    return {"start": start, "end": end}
+
+
 def _build_config(
     *,
     jobs_dir: Path,
+    ingest: dict[str, Any] | None = None,
     transcribe: dict[str, Any],
     llm: dict[str, Any],
     refine: dict[str, Any],
@@ -144,6 +201,7 @@ def _build_config(
             _D.model_dump()
             | {
                 "jobs_dir": jobs_dir,
+                "ingest": IngestConfig.model_validate(_D.ingest.model_dump() | (ingest or {})),
                 "transcribe": TranscribeConfig.model_validate(
                     _D.transcribe.model_dump() | transcribe
                 ),
@@ -170,6 +228,82 @@ def _progress_line(event: StageEvent, total: int) -> str:
     index = _STAGES.index(event.stage) + 1
     elapsed = f"{event.elapsed:.1f}s" if event.elapsed is not None else ""
     return f"[{index}/{total}] {event.stage.value:<11} {event.status.value:<9} {elapsed}".rstrip()
+
+
+CLEAR_LINE = "\x1b[K"
+REDRAW_INTERVAL = 0.1
+"""Seconds between redraws of the running line on a terminal (at most ~10 per second)."""
+
+
+def _running_line(event: StageEvent, total: int, elapsed: float) -> str:
+    """``[2/5] transcribe   42%  12:30 / 58:10  31.0s`` for a RUNNING event with progress."""
+    index = _STAGES.index(event.stage) + 1
+    percent = f"{(event.progress or 0.0) * 100:.0f}%"
+    detail = f"{event.detail}  " if event.detail else ""
+    return f"[{index}/{total}] {event.stage.value:<11} {percent:>4}  {detail}{elapsed:.1f}s"
+
+
+def _tty_line(event: StageEvent, total: int, elapsed: float, width: int) -> str:
+    """The running line redrawn in place: a carriage return, the line cut to the terminal width (a
+    wrapped line can't be redrawn), then clear to the end of the line."""
+    return "\r" + _running_line(event, total, elapsed)[: max(width - 1, 1)] + CLEAR_LINE
+
+
+class _StageOutput:
+    """Turns ``StageEvent``s into the CLI's stage lines (#61).
+
+    DONE / SKIPPED / FAILED print one final line per stage, as always. RUNNING events
+    with ``progress`` show where a long stage is: on a terminal, one line redrawn in
+    place (throttled); otherwise (piped, or ``--verbose``, whose log lines would break
+    an in-place line) a plain line each time the stage passes another 10%.
+    """
+
+    def __init__(
+        self,
+        *,
+        tty: bool,
+        total: int = len(_STAGES),
+        clock: Callable[[], float] = time.monotonic,
+        width: Callable[[], int] = lambda: shutil.get_terminal_size().columns,
+    ) -> None:
+        self._tty = tty
+        self._total = total
+        self._clock = clock
+        self._width = width
+        self._started: dict[StageName, float] = {}
+        self._steps: dict[StageName, int] = {}
+        self._last_draw = -REDRAW_INTERVAL
+        self._drawn = False
+
+    def __call__(self, event: StageEvent) -> None:
+        now = self._clock()
+        if event.status is StageStatus.RUNNING:
+            started = self._started.setdefault(event.stage, now)
+            if event.progress is not None:
+                self._show(event, now - started, now)
+            return
+        if self._drawn:
+            typer.echo("\r" + CLEAR_LINE, nl=False, color=True)
+            self._drawn = False
+        typer.echo(_progress_line(event, self._total))
+
+    def _show(self, event: StageEvent, elapsed: float, now: float) -> None:
+        if self._tty:
+            if now - self._last_draw < REDRAW_INTERVAL:
+                return
+            self._last_draw = now
+            # color=True: keep the clear-line code (only ever written to a terminal).
+            typer.echo(_tty_line(event, self._total, elapsed, self._width()), nl=False, color=True)
+            self._drawn = True
+            return
+        step = int((event.progress or 0.0) * 10)
+        if step > self._steps.get(event.stage, 0):
+            self._steps[event.stage] = step
+            typer.echo(_running_line(event, self._total, elapsed))
+
+
+def _is_terminal() -> bool:
+    return sys.stdout.isatty() and os.environ.get("TERM") != "dumb"
 
 
 class _DownloadProgress:
@@ -210,6 +344,16 @@ def run(
     from_stage: Annotated[
         StageName | None,
         typer.Option(help="Re-run this stage and every later one.", show_default=False),
+    ] = None,
+    focus_range: Annotated[
+        str | None,
+        typer.Option(
+            "--range",
+            metavar="START:END",
+            help="Only process this part of the video, in seconds or percent "
+            "(15%:85%, 120:3300, :85%). Clips keep original-video times.",
+            show_default=False,
+        ),
     ] = None,
     whisper_model: Annotated[
         str, typer.Option(help="faster-whisper model size.")
@@ -256,6 +400,7 @@ def run(
 
     config = _build_config(
         jobs_dir=jobs_dir,
+        ingest=parse_range(focus_range),
         transcribe={"model_size": whisper_model, "language": language},
         llm={"provider": llm_provider, "model": llm_model},
         refine={
@@ -268,9 +413,7 @@ def run(
     )
     _check_captions_supported(config)
 
-    def on_event(event: StageEvent) -> None:
-        if event.status is not StageStatus.RUNNING:
-            typer.echo(_progress_line(event, len(_STAGES)))
+    on_event = _StageOutput(tty=_is_terminal() and not verbose)
 
     try:
         if is_url(video):
