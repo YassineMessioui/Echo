@@ -50,7 +50,14 @@ One line per stage while it runs, e.g.
 ...
 ```
 
-then the job directory and the path of every clip. On failure it prints the stage and
+While a long stage runs (transcribe, llm, clip), a terminal shows one line redrawn in
+place with its percentage, detail and elapsed time, e.g.
+`[2/5] transcribe   42%  12:30 / 58:10  31.0s`, replaced by the stage's final line. When
+the output isn't a terminal (piped, redirected), the same line is printed plainly each
+time the stage passes another 10%, with no control characters. `--verbose` also uses the
+plain lines, since its log lines would break a line redrawn in place.
+
+At the end it prints the job directory and the path of every clip. On failure it prints the stage and
 error message (no traceback unless `--verbose`).
 
 ## Exit codes

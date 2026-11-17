@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from echo import progress
 from echo.config import ChunkConfig, PipelineConfig
 from echo.errors import ArtifactError
 from echo.interfaces import Stage
@@ -178,3 +179,17 @@ def test_llm_stage_requires_transcript(job_copy: Job):
     stage = LLMStage(chunker=_fixed_chunker([]), extractor=_ScriptedExtractor({}))
     with pytest.raises(ArtifactError, match="missing"):
         stage.run(job_copy, PipelineConfig())
+
+
+def test_llm_stage_reports_windows_done(job_copy: Job):
+    spans = [(0, 2), (2, 4), (4, 6), (6, 7)]
+    extractor = _ScriptedExtractor({s: [] for s, _ in spans})
+    reports: list[tuple[float, str]] = []
+    with progress.capture(lambda fraction, detail: reports.append((fraction, detail))):
+        LLMStage(chunker=_fixed_chunker(spans), extractor=extractor).run(job_copy, PipelineConfig())
+    assert reports == [
+        (0.25, "window 1/4"),
+        (0.5, "window 2/4"),
+        (0.75, "window 3/4"),
+        (1.0, "window 4/4"),
+    ]

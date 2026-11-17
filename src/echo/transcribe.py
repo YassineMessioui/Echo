@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 import numpy as np
 
+from echo import progress
 from echo.config import PipelineConfig, TranscribeConfig
 from echo.errors import ArtifactError, TranscriptionError
 from echo.interfaces import Transcriber
@@ -145,6 +146,13 @@ def _clamp(value: float, low: float, high: float) -> float:
     return min(max(value, low), high)
 
 
+def _clock(seconds: float) -> str:
+    """``750`` → ``"12:30"``, ``3725`` → ``"1:02:05"`` (for progress details)."""
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
 class WhisperTranscriber:
     """Implements ``echo.interfaces.Transcriber`` with faster-whisper.
 
@@ -215,8 +223,17 @@ class WhisperTranscriber:
                 # Without VAD the batched pipeline has no chunk boundaries of its own.
                 kwargs["clip_timestamps"] = fixed_chunks(len(samples))
         raw_segments, info = self._model.transcribe(samples, **kwargs)
-        # Segments are a lazy generator: decoding happens while iterating.
-        return self._build(list(raw_segments), language=info.language, duration=info.duration)
+        # Segments are a lazy generator: decoding happens while iterating, so report
+        # progress (#61) as each one arrives.
+        duration = max(float(info.duration), 0.0)
+        segments: list[Any] = []
+        for segment in raw_segments:
+            segments.append(segment)
+            if duration > 0:
+                done = min(float(segment.end), duration)
+                progress.report(done / duration, f"{_clock(done)} / {_clock(duration)}")
+        progress.report(1.0, f"{_clock(duration)} / {_clock(duration)}")
+        return self._build(segments, language=info.language, duration=info.duration)
 
     @staticmethod
     def _build(raw_segments: list[Any], *, language: str, duration: float) -> Transcript:

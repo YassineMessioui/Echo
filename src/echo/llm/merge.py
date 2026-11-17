@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
+from echo import progress
 from echo.config import PipelineConfig
 from echo.interfaces import Chunker, TopicExtractor, TopicMerger
 from echo.job import Job
@@ -122,7 +123,12 @@ class LLMStage:
     def run(self, job: Job, config: PipelineConfig) -> None:
         transcript = job.read_transcript()
         windows = self.chunker(transcript, config.chunk)
-        per_window = [self.extractor.extract(window) for window in windows]
+        per_window: list[list[Topic]] = []
+        for window in windows:
+            per_window.append(self.extractor.extract(window))
+            # Windows done / total, from this thread (works as futures complete, too).
+            done = len(per_window)
+            progress.report(done / len(windows), f"window {done}/{len(windows)}")
         job.write_topics(self.merger(per_window))
         if self.models:
             meta = job.read_meta()
