@@ -12,8 +12,10 @@ the provider's own variable (e.g. ``GROQ_API_KEY``).
 
 from __future__ import annotations
 
+import logging
 import os
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +23,13 @@ import httpx
 
 from echo.config import LLMConfig
 from echo.errors import LLMError
+
+logger = logging.getLogger(__name__)
+
+RATE_LIMIT_RETRIES = 5
+"""HTTP 429 answers retried per request before giving up (#56)."""
+MAX_RATE_LIMIT_WAIT_S = 60.0
+"""A longer ``retry-after`` (e.g. a daily quota) is not waited out: the 429 is raised."""
 
 API_KEY_ENV = "ECHO_LLM_API_KEY"
 """Overrides the provider-specific API key variable."""
@@ -78,6 +87,11 @@ class OpenAICompatibleClient:
     When ``json_schema`` is given, JSON mode (``response_format: json_object``) is
     requested; the caller still validates the answer. If the server rejects JSON mode,
     the request is repeated without it once and JSON mode stays off for this client.
+
+    HTTP 429 (rate limit) is retried up to ``RATE_LIMIT_RETRIES`` times, waiting for the
+    server's ``retry-after`` (or 1, 2, 4, … s without one). Parallel window extraction
+    (#56) hits the free tiers' per-minute limits. The client is safe to share between
+    threads (``httpx.Client`` is).
     """
 
     def __init__(
@@ -91,8 +105,10 @@ class OpenAICompatibleClient:
         timeout_s: float = 120.0,
         key_env: str = API_KEY_ENV,
         transport: httpx.BaseTransport | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.provider = provider
+        self._sleep = sleep
         self.model = model
         self.model_name = f"{provider}/{model}"
         self.temperature = temperature
@@ -179,6 +195,20 @@ class OpenAICompatibleClient:
     # --- helpers ---------------------------------------------------------------------
 
     def _post(self, body: dict[str, Any]) -> httpx.Response:
+        for attempt in range(RATE_LIMIT_RETRIES + 1):
+            response = self._post_once(body)
+            if response.status_code != 429 or attempt == RATE_LIMIT_RETRIES:
+                return response
+            wait = _retry_after(response)
+            if wait is None:
+                wait = float(2**attempt)
+            elif wait > MAX_RATE_LIMIT_WAIT_S:
+                return response  # a quota, not a burst: report it instead of waiting
+            logger.info("%s rate limit (HTTP 429); retrying in %.1f s", self.provider, wait)
+            self._sleep(wait)
+        raise AssertionError("unreachable")
+
+    def _post_once(self, body: dict[str, Any]) -> httpx.Response:
         try:
             return self._http.post("chat/completions", json=body)
         except httpx.ConnectError as e:
@@ -211,6 +241,14 @@ class OpenAICompatibleClient:
             hint = f"; retry after {wait}s" if wait else ""
             raise LLMError(f"{self.provider} rate limit reached (HTTP 429){hint}: {detail}")
         raise LLMError(f"{self.provider} returned HTTP {status}: {detail}")
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """``retry-after`` in seconds (only the seconds form; HTTP dates are rare here)."""
+    try:
+        return max(float(response.headers["retry-after"]), 0.0)
+    except (KeyError, ValueError):
+        return None
 
 
 def _error_message(response: httpx.Response) -> str:

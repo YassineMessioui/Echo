@@ -10,6 +10,7 @@ from echo.llm.client import make_llm_client
 from echo.llm.hosted import API_KEY_ENV, PROVIDERS, OpenAICompatibleClient
 
 SCHEMA = {"type": "object"}
+SLEPT: list[float] = []
 
 
 def _ok(content: str) -> httpx.Response:
@@ -30,6 +31,7 @@ def _client(handler, config: LLMConfig | None = None, env: dict | None = None):
         env={"GROQ_API_KEY": "gsk-test"} if env is None else env,
         transport=httpx.MockTransport(record),
     )
+    client._sleep = SLEPT.append  # no real waiting on HTTP 429 retries
     return client, seen
 
 
@@ -139,8 +141,11 @@ def test_falls_back_when_json_mode_is_unsupported():
             "no model 'openai/gpt-oss-120b'.*Set llm.model",
         ),
         (
-            httpx.Response(429, headers={"retry-after": "7"}, json={"error": {"message": "slow"}}),
-            r"rate limit reached \(HTTP 429\); retry after 7s: slow",
+            # Longer than MAX_RATE_LIMIT_WAIT_S (a quota): raised without waiting.
+            httpx.Response(
+                429, headers={"retry-after": "120"}, json={"error": {"message": "slow"}}
+            ),
+            r"rate limit reached \(HTTP 429\); retry after 120s: slow",
         ),
         (
             httpx.Response(400, json=[{"error": {"message": "Please pass a valid API key."}}]),
@@ -176,3 +181,52 @@ def test_connection_and_timeout_errors():
         _client(refuse)[0].complete("s", "p")
     with pytest.raises(LLMError, match="timed out after 120s"):
         _client(slow)[0].complete("s", "p")
+
+
+# --- rate limits (#56) --------------------------------------------------------------------
+
+
+def _limited(times: int, retry_after: str | None):
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] <= times:
+            headers = {"retry-after": retry_after} if retry_after else {}
+            return httpx.Response(429, headers=headers, json={"error": {"message": "slow"}})
+        return _ok("{}")
+
+    return handler
+
+
+def test_429_waits_for_retry_after_then_succeeds():
+    SLEPT.clear()
+    client, seen = _client(_limited(2, "1.5"))
+    assert client.complete("s", "p") == "{}"
+    assert len(seen) == 3
+    assert SLEPT == [1.5, 1.5]
+
+
+def test_429_without_retry_after_backs_off_exponentially():
+    SLEPT.clear()
+    client, _ = _client(_limited(3, None))
+    assert client.complete("s", "p") == "{}"
+    assert SLEPT == [1.0, 2.0, 4.0]
+
+
+def test_429_gives_up_after_the_retry_budget():
+    from echo.llm.hosted import RATE_LIMIT_RETRIES
+
+    SLEPT.clear()
+    client, seen = _client(_limited(100, "2"))
+    with pytest.raises(LLMError, match=r"rate limit reached \(HTTP 429\); retry after 2s"):
+        client.complete("s", "p")
+    assert len(seen) == RATE_LIMIT_RETRIES + 1
+    assert SLEPT == [2.0] * RATE_LIMIT_RETRIES
+
+
+def test_429_on_json_mode_is_retried_before_the_json_fallback():
+    SLEPT.clear()
+    client, seen = _client(_limited(1, "0"))
+    assert client.complete("s", "p", json_schema=SCHEMA) == "{}"
+    assert [("response_format" in json.loads(r.content)) for r in seen] == [True, True]
