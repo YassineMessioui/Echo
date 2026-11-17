@@ -16,7 +16,7 @@ import logging
 import math
 import os
 import random
-import time
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -109,6 +109,10 @@ class OpenAICompatibleClient:
     a timeout or dropped connection is retried once. Parallel window extraction (#56)
     makes both more likely on free tiers. The client is safe to share between threads
     (``httpx.Client`` is).
+
+    ``close()`` may be called from another thread to stop every request (Ctrl+C, #83):
+    retry waits end at once, the HTTP client is closed so requests in flight fail fast,
+    and requests raise LLMError from then on.
     """
 
     def __init__(
@@ -122,11 +126,13 @@ class OpenAICompatibleClient:
         timeout_s: float = 120.0,
         key_env: str = API_KEY_ENV,
         transport: httpx.BaseTransport | None = None,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], object] | None = None,
         jitter: Callable[[float], float] = _jitter,
     ) -> None:
         self.provider = provider
-        self._sleep = sleep
+        self._closed = threading.Event()
+        # Retry waits wait on the event that close() sets, so closing ends them.
+        self._sleep = self._closed.wait if sleep is None else sleep
         self._jitter = jitter
         self.model = model
         self.model_name = f"{provider}/{model}"
@@ -209,6 +215,8 @@ class OpenAICompatibleClient:
         return content
 
     def close(self) -> None:
+        """Stop this client; safe to call from another thread (see the class docstring)."""
+        self._closed.set()
         self._http.close()
 
     # --- helpers ---------------------------------------------------------------------
@@ -217,16 +225,20 @@ class OpenAICompatibleClient:
         waited = 0.0
         timeouts = 0
         for attempt in range(1, MAX_RETRIES + 2):  # attempt n is retry n - 1
+            self._check_open()
             try:
                 response = self._http.post("chat/completions", json=body)
-            except (httpx.TimeoutException, httpx.RemoteProtocolError) as e:
+            except (httpx.HTTPError, RuntimeError) as e:  # RuntimeError: closed meanwhile
+                self._check_open()
+                if not isinstance(e, httpx.HTTPError):
+                    raise
+                if not isinstance(e, httpx.TimeoutException | httpx.RemoteProtocolError):
+                    raise self._transport_error(e, retries=attempt - 1) from e
                 wait = self._jitter(2.0 ** (attempt - 1))
                 if timeouts >= TIMEOUT_RETRIES or waited + wait > MAX_TOTAL_WAIT_S:
                     raise self._transport_error(e, retries=attempt - 1) from e
                 timeouts += 1
                 reason = "request timed out" if isinstance(e, httpx.TimeoutException) else str(e)
-            except httpx.HTTPError as e:
-                raise self._transport_error(e, retries=attempt - 1) from e
             else:
                 if response.status_code not in RETRY_STATUSES:
                     return response
@@ -245,6 +257,10 @@ class OpenAICompatibleClient:
             self._sleep(wait)
             waited += wait
         raise AssertionError("unreachable")
+
+    def _check_open(self) -> None:
+        if self._closed.is_set():
+            raise LLMError(f"{self.provider} request cancelled: the client was closed")
 
     def _transport_error(self, e: httpx.HTTPError, *, retries: int) -> LLMError:
         gave_up = f" (gave up after {retries} retries)" if retries else ""

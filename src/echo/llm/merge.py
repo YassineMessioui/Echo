@@ -3,8 +3,10 @@ chunking → extraction → merging over a whole transcript."""
 
 from __future__ import annotations
 
+import logging
+import queue
+import threading
 from collections.abc import Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
@@ -14,6 +16,8 @@ from echo.config import LLMConfig, PipelineConfig
 from echo.interfaces import Chunker, TopicExtractor, TopicMerger
 from echo.job import Job
 from echo.models import StageName, Topic, TranscriptWindow
+
+logger = logging.getLogger(__name__)
 
 HOSTED_CONCURRENCY = 4
 """``LLMConfig.max_concurrency = None`` for a hosted provider."""
@@ -28,6 +32,12 @@ def concurrency(config: LLMConfig) -> int:
     return 1 if config.provider == "ollama" else HOSTED_CONCURRENCY
 
 
+_POLL_S = 0.05
+"""How often the stage thread wakes while waiting for windows, so Ctrl+C is handled
+at once (a blocking wait isn't interrupted by ``_thread.interrupt_main``, nor by
+Ctrl+C on Windows)."""
+
+
 def extract_all(
     extractor: TopicExtractor,
     windows: list[TranscriptWindow],
@@ -40,33 +50,79 @@ def extract_all(
     Results are in window order, so merging is deterministic. ``on_done(n)`` is called
     from this thread each time another window finishes (``n`` = windows done so far), so
     ``echo.progress`` reports reach the pipeline (#61). As soon as any window fails, the
-    windows not started yet are cancelled (a dead provider doesn't get every request);
-    calls already in flight finish, since a thread can't be interrupted. The error raised
-    is the one from the lowest failed window, so the message is stable.
+    windows not started yet are skipped (a dead provider doesn't get every request) and
+    the calls in flight finish; the error raised is the one from the lowest failed
+    window, so the message is stable.
+
+    On ``KeyboardInterrupt`` (#83) nothing is waited for: windows not started are
+    skipped, ``extractor.close()`` is called if it exists (the HTTP client is closed and
+    retry waits end, so calls in flight fail fast), and the interrupt is re-raised.
+    Errors those calls raise afterwards are ignored. Windows run on daemon threads,
+    even with ``workers <= 1``: the interpreter doesn't join them at exit, and this
+    thread only waits in short steps, so Ctrl+C is handled promptly.
     """
     report = on_done or (lambda done: None)
-    if workers <= 1 or len(windows) <= 1:
-        results = []
-        for window in windows:
-            results.append(extractor.extract(window))
-            report(len(results))
-        return results
-    pool = ThreadPoolExecutor(max_workers=min(workers, len(windows)), thread_name_prefix="llm")
+    if not windows:
+        return []
+    results: list[list[Topic]] = [[] for _ in windows]
+    errors: dict[int, BaseException] = {}
+    finished: queue.SimpleQueue[int] = queue.SimpleQueue()
+    pending = iter(range(len(windows)))
+    lock = threading.Lock()
+    stop = threading.Event()
+
+    def work() -> None:
+        while not stop.is_set():
+            with lock:
+                i = next(pending, None)
+            if i is None:
+                return
+            try:
+                results[i] = extractor.extract(windows[i])
+            except BaseException as e:  # reported by the stage thread
+                errors[i] = e
+            finished.put(i)
+
+    threads = [
+        threading.Thread(target=work, name=f"llm-{k}", daemon=True)
+        for k in range(min(max(workers, 1), len(windows)))
+    ]
     try:
-        futures = [pool.submit(extractor.extract, window) for window in windows]
+        for thread in threads:
+            thread.start()
         done = 0
-        for future in as_completed(futures):
-            if future.exception() is not None:
-                break  # cancel the rest below
+        while done < len(windows):
+            try:
+                i = finished.get(timeout=_POLL_S)
+            except queue.Empty:
+                continue
+            if i in errors:
+                break
             done += 1
             report(done)
+        stop.set()
+        for thread in threads:  # after an error: let the calls in flight finish
+            while thread.is_alive():
+                thread.join(_POLL_S)
+    except KeyboardInterrupt:
+        stop.set()
+        _close(extractor)
+        raise
     finally:
-        pool.shutdown(wait=True, cancel_futures=True)
-    for future in futures:
-        error = None if future.cancelled() else future.exception()
-        if error is not None:
-            raise error
-    return [future.result() for future in futures]
+        stop.set()
+    if errors:
+        raise errors[min(errors)]
+    return results
+
+
+def _close(extractor: TopicExtractor) -> None:
+    """Close ``extractor`` if it can be (``LLMTopicExtractor`` closes its client)."""
+    close = getattr(extractor, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # never hide the interrupt
+            logger.warning("closing the LLM client failed", exc_info=True)
 
 
 DEFAULT_IOU_THRESHOLD = 0.5
