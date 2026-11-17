@@ -256,3 +256,12 @@ def test_refine_max_clips_and_caption_font_defaults():
     with pytest.raises(ValidationError):
         RefineConfig(max_clips=0)
     assert CaptionConfig().font == "Montserrat ExtraBold"
+
+
+def test_link_job_paths_and_remote_video(tmp_path: Path):
+    from echo.interfaces import RemoteVideo
+
+    job = Job(tmp_path / "youtube-x")
+    assert job.input_audio == job.root / "input-audio.m4a"
+    remote = RemoteVideo(url="https://example/v", audio=job.input_audio, width=1920, height=1080)
+    assert remote.headers == {}
