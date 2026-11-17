@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from echo import download
 from echo.download import VideoInfo, download_video, is_url, job_from_url, probe_url
 from echo.errors import ArtifactError, InvalidInputError
 from echo.job import Job
+from echo.progress import capture
 
 URL = "https://youtu.be/abcDEF12345"
 INFO = {
@@ -240,6 +242,35 @@ def test_video_source(tmp_path):
     assert download.video_source(job, ydl_factory=factory(info=DASH_ONLY)) == job.input_video
     assert job.input_video.is_file()
     assert download.video_source(job, ydl_factory=factory(error=AssertionError)) == job.input_video
+
+
+def test_video_source_fallback_logs_and_reports_progress(tmp_path, caplog):
+    job = job_from_url(tmp_path, URL, ydl_factory=factory(info=SEEKABLE))
+    reports: list[tuple[float, str]] = []
+    with (
+        caplog.at_level(logging.INFO, logger="echo.download"),
+        capture(lambda f, d: reports.append((f, d))),
+    ):
+        assert download.video_source(job, ydl_factory=factory(info=DASH_ONLY)) == job.input_video
+    assert reports == [(0.5, "downloading full video")]  # the fake reports 50/100 bytes
+    [record] = caplog.records
+    assert record.levelno == logging.WARNING
+    assert "can't be read remotely" in record.message and "full video" in record.message
+    assert "http_dash_segments" in record.message  # why
+
+
+@pytest.mark.parametrize("name", ["Cookie", "Authorization", "X-Session-Token"])
+def test_streams_needing_credentials_are_not_read_remotely(tmp_path, caplog, name):
+    # Remote headers go on ffmpeg's argv (process list), so credentials never do:
+    # such a stream is downloaded in full by yt-dlp instead.
+    video, audio = SEEKABLE["requested_formats"]
+    headers = {"User-Agent": "UA", name: "s3cret"}
+    info = SEEKABLE | {"requested_formats": [video | {"http_headers": headers}, audio]}
+    assert download.resolve_video(URL, tmp_path / "a.m4a", ydl_factory=factory(info=info)) is None
+    job = job_from_url(tmp_path, URL, ydl_factory=factory(info=SEEKABLE))
+    with caplog.at_level(logging.INFO, logger="echo.download"):
+        assert download.video_source(job, ydl_factory=factory(info=info)) == job.input_video
+    assert name in caplog.text and "s3cret" not in caplog.text
 
 
 def test_video_source_without_any_input(tmp_path):

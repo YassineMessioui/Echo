@@ -62,8 +62,19 @@ def test_non_ascii_output_is_decoded_as_utf8(monkeypatch):
 
 def test_timeout_is_reported(monkeypatch):
     _fake_tool(monkeypatch)
-    with pytest.raises(ExternalToolError, match="timed out"):
-        ffmpeg.run("fake", ["-c", "import time; time.sleep(5)"], timeout=0.2)
+    with pytest.raises(ExternalToolError, match="timed out") as e:
+        ffmpeg.run("fake", ["-c", "import time; time.sleep(5)  # -headers X"], timeout=0.2)
+    # argv (which can hold -headers) is in neither the message nor a chained cause.
+    assert "-headers" not in str(e.value) and e.value.__cause__ is None
+    assert e.value.__suppress_context__
+
+
+def test_failure_message_has_stderr_not_argv(monkeypatch):
+    _fake_tool(monkeypatch)
+    script = "import sys; sys.stderr.write('boom'); sys.exit(1)  # -headers User-Agent: UA"
+    with pytest.raises(ExternalToolError, match="boom") as e:
+        ffmpeg.run("fake", ["-c", script])
+    assert "-headers" not in str(e.value)
 
 
 @pytest.mark.ffmpeg

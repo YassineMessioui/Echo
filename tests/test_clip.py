@@ -7,6 +7,7 @@ import pytest
 
 from echo import clip as clip_module
 from echo import ffmpeg as ffmpeg_module
+from echo import progress
 from echo.captions import subtitles_filter
 from echo.clip import (
     MANIFEST,
@@ -623,6 +624,14 @@ def test_args_for_remote_video_read_only_the_clip_and_local_audio(tmp_path, monk
     assert args[args.index("-map") + 1 : args.index("-map") + 4] == ["0:v:0", "-map", "1:a:0"]
 
 
+def test_no_headers_option_without_headers(tmp_path, monkeypatch):
+    monkeypatch.setattr(clip_module, "http_options", lambda: frozenset())
+    remote = RemoteVideo(url="https://v", audio=tmp_path / "a.m4a", width=1920, height=1080)
+    args = build_ffmpeg_args(remote, ClipSpec.between("t", 1.0, 5.0), tmp_path / "o", ClipConfig())
+    assert "-headers" not in args and "" not in args
+    assert args[:4] == ["-accurate_seek", "-ss", "1.000", "-i"]
+
+
 def test_stage_resolves_the_source_once_and_only_when_cutting(job_copy):
     job = job_copy
     job.input_audio.write_bytes(b"audio")
@@ -693,3 +702,26 @@ def test_cut_from_a_remote_http_video(make_video, tmp_path):
     info = probe(out)
     assert (info.width, info.height) == TARGET and info.has_audio
     assert info.duration == pytest.approx(spec.duration, abs=0.1)
+
+
+def test_run_reports_clips_done(job_copy):
+    job = _job_with_video(job_copy)
+    n = len(job.read_clips())
+    reports: list[tuple[float, str]] = []
+    with progress.capture(lambda fraction, detail: reports.append((fraction, detail))):
+        ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
+    assert reports == [(i / n, f"clip {i}/{n}") for i in range(1, n + 1)]
+
+
+def test_up_to_date_clips_count_as_done(job_copy):
+    job = _job_with_video(job_copy)
+    ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
+    job.clip_video_path(1, job.read_clips()[0].topic_title).unlink()  # only the 1st is re-cut
+    reports: list[tuple[float, str]] = []
+    clipper = RecordingClipper()
+    with progress.capture(lambda fraction, detail: reports.append((fraction, detail))):
+        ClipStage(clipper=clipper).run(job, PipelineConfig())
+    n = len(job.read_clips())
+    assert len(clipper.cut) == 1
+    assert [f for f, _ in reports] == sorted(f for f, _ in reports)
+    assert reports[-1] == (1.0, f"clip {n}/{n}")

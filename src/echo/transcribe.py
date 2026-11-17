@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 import numpy as np
 
+from echo import progress
 from echo.config import PipelineConfig, TranscribeConfig
 from echo.errors import ArtifactError, TranscriptionError
 from echo.interfaces import Transcriber
@@ -145,6 +146,13 @@ def _clamp(value: float, low: float, high: float) -> float:
     return min(max(value, low), high)
 
 
+def _clock(seconds: float) -> str:
+    """``750`` → ``"12:30"``, ``3725`` → ``"1:02:05"`` (for progress details)."""
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
 class WhisperTranscriber:
     """Implements ``echo.interfaces.Transcriber`` with faster-whisper.
 
@@ -215,8 +223,17 @@ class WhisperTranscriber:
                 # Without VAD the batched pipeline has no chunk boundaries of its own.
                 kwargs["clip_timestamps"] = fixed_chunks(len(samples))
         raw_segments, info = self._model.transcribe(samples, **kwargs)
-        # Segments are a lazy generator: decoding happens while iterating.
-        return self._build(list(raw_segments), language=info.language, duration=info.duration)
+        # Segments are a lazy generator: decoding happens while iterating, so report
+        # progress (#61) as each one arrives.
+        duration = max(float(info.duration), 0.0)
+        segments: list[Any] = []
+        for segment in raw_segments:
+            segments.append(segment)
+            if duration > 0:
+                done = min(float(segment.end), duration)
+                progress.report(done / duration, f"{_clock(done)} / {_clock(duration)}")
+        progress.report(1.0, f"{_clock(duration)} / {_clock(duration)}")
+        return self._build(segments, language=info.language, duration=info.duration)
 
     @staticmethod
     def _build(raw_segments: list[Any], *, language: str, duration: float) -> Transcript:
@@ -258,6 +275,34 @@ class TranscribeStage:
     def outputs(self, job: Job) -> list[Path]:
         return [job.transcript_path]
 
+    def settings(self, config: PipelineConfig) -> str:
+        """Fingerprint of the settings the transcript depends on (#82), e.g.
+        ``"small|lang=auto|sequential|vad(min_silence=2000ms)"``.
+
+        The orchestrator re-transcribes when it differs from the one in ``job.json``.
+        It covers ``model_size``, ``language``, batched vs sequential and the ``vad_*``
+        fields. The batch *size* is left out: batched-8 and batched-16 give word-for-word
+        identical transcripts (#79 benchmarks), so it only changes speed.
+        ``device`` and ``compute_type`` are left out: they choose where, and at what
+        precision, the same model runs (the CUDA → CPU fallback changes both at run
+        time), so switching them keeps the transcript. An unset ``vad_min_silence_ms``
+        shows faster-whisper's default for the mode, so setting that same value
+        explicitly doesn't re-run; without VAD it's ignored.
+        """
+        t = config.transcribe
+        if t.vad_filter:
+            default_ms = 160 if t.batch_size else 2000
+            min_silence = default_ms if t.vad_min_silence_ms is None else t.vad_min_silence_ms
+            vad = f"vad(min_silence={min_silence}ms)"
+        else:
+            vad = "no-vad"
+        decode = "batched" if t.batch_size else "sequential"
+        return f"{t.model_size}|lang={t.language or 'auto'}|{decode}|{vad}"
+
+    @staticmethod
+    def _mode(t: TranscribeConfig) -> str:
+        return f"batched-{t.batch_size}" if t.batch_size else "sequential"
+
     def run(self, job: Job, config: PipelineConfig) -> None:
         if not job.audio_path.is_file():
             raise ArtifactError(f"missing artifact: {job.audio_path}")
@@ -265,6 +310,8 @@ class TranscribeStage:
         meta = job.read_meta()
         job.write_transcript(in_original_time(transcript, _ingest_offset(meta.models)))
         meta.models["whisper"] = self.transcriber.model_name
+        t = config.transcribe
+        meta.models["whisper_mode"] = f"{self._mode(t)}, {'vad' if t.vad_filter else 'no vad'}"
         job.write_meta(meta)
 
 
