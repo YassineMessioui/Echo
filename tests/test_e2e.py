@@ -151,11 +151,10 @@ def _check_resume(job: Job, stages: list, config: PipelineConfig) -> None:
     events: list[StageEvent] = []
     meta = run_pipeline(job, stages, config, on_event=events.append)
 
-    assert [(e.stage, e.status) for e in events] == [
-        (name, StageStatus.SKIPPED) for name in StageName
-    ]
+    ran = [stage.name for stage in stages]  # diarize is optional and off here
+    assert [(e.stage, e.status) for e in events] == [(name, StageStatus.SKIPPED) for name in ran]
     for record in (meta, job.read_meta()):
-        for name in StageName:
+        for name in ran:
             assert record.stages[name].status == StageStatus.SKIPPED
             assert record.stages[name].finished_at is not None
             assert record.stages[name].error is None
@@ -169,9 +168,12 @@ def test_pipeline_end_to_end(tmp_path: Path):
 
     meta = run_pipeline(job, stages, config)
 
-    assert {name: meta.stages[name].status for name in StageName} == {
-        name: StageStatus.DONE for name in StageName
+    ran = [stage.name for stage in stages]
+    assert StageName.DIARIZE not in ran, "diarization is off by default"
+    assert {name: meta.stages[name].status for name in ran} == {
+        name: StageStatus.DONE for name in ran
     }
+    assert meta.stages[StageName.DIARIZE].status == StageStatus.PENDING
     assert job.read_meta() == meta
     assert meta.models["whisper"] == f"faster-whisper/{config.transcribe.model_size}"
     assert meta.models["llm"] == client.model_name
