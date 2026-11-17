@@ -165,7 +165,8 @@ def _refine(transcript: Transcript, topics: list[Topic], config: RefineConfig) -
     for i, clip in enumerate(clips):
         before = clip.start - clips[i - 1].end if i > 0 else float("inf")
         after = clips[i + 1].start - clip.end if i + 1 < len(clips) else float("inf")
-        start = max(0.0, clip.start - min(pad, before / 2))
+        # The transcribed span is [offset, duration] of the original video (focus range).
+        start = max(transcript.offset, clip.start - min(pad, before / 2))
         end = min(transcript.duration, clip.end + min(pad, after / 2))
         start, end = round(start, 3), round(end, 3)
         end = min(end, round(start + config.max_duration, 3))
