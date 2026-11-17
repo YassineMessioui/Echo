@@ -25,7 +25,9 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 from collections.abc import Callable
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
@@ -68,8 +70,11 @@ def build_ffmpeg_args(
     config: ClipConfig,
     *,
     video_filter: str | None = None,
+    threads: int | None = None,
 ) -> list[str]:
     """ffmpeg arguments (after the global flags) that cut ``clip`` from ``video`` into ``out``.
+
+    ``threads`` caps the encoder's threads, so parallel encodes share the cores (#57).
 
     ``video_filter`` is passed as ``-vf`` in the same encode (e.g. the 9:16 crop/scale
     graph from ``echo.reframe``); ``None`` keeps the source framing.
@@ -94,6 +99,8 @@ def build_ffmpeg_args(
     # -crf / -preset are x264/x265 options; hardware encoders (e.g. h264_nvenc) need others.
     args += ["-c:v", config.video_codec, "-crf", str(config.crf), "-preset", config.preset]
     args += ["-pix_fmt", "yuv420p", "-c:a", config.audio_codec]
+    if threads is not None:
+        args += ["-threads", str(threads)]
     # The temp file has no .mp4 extension, so the muxer is named explicitly.
     args += ["-movflags", "+faststart", "-f", "mp4", str(out)]
     return args
@@ -105,13 +112,16 @@ def _cut_one(
     out: Path,
     config: ClipConfig,
     video_filter: str | None,
+    threads: int | None = None,
 ) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=out.parent, prefix=f".{out.name}.", suffix=".tmp")
     os.close(fd)  # ffmpeg reopens it; Windows can't share an open handle
     tmp = Path(tmp_name)
     try:
-        ffmpeg(build_ffmpeg_args(video, clip, tmp, config, video_filter=video_filter))
+        ffmpeg(
+            build_ffmpeg_args(video, clip, tmp, config, video_filter=video_filter, threads=threads)
+        )
         os.replace(tmp, out)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -156,11 +166,25 @@ def cut_clips(
         else:
             video_filter = video_filter_for(video, config)
     video_filter = chain_filters(video_filter, extra_filter)
+    threads = encoder_threads(config)
     for clip, out in zip(clips, outputs, strict=True):
-        _cut_one(video, clip, out, config, video_filter)
+        _cut_one(video, clip, out, config, video_filter, threads)
 
 
 _: Clipper = cut_clips
+
+
+def clip_workers(config: ClipConfig) -> int:
+    """Clips encoded at once: ``config.max_workers``, else ``min(4, cpu_count // 2)``."""
+    if config.max_workers is not None:
+        return config.max_workers
+    return max(1, min(4, (os.cpu_count() or 2) // 2))
+
+
+def encoder_threads(config: ClipConfig) -> int | None:
+    """Each parallel ffmpeg's share of the cores; None (ffmpeg decides) when sequential."""
+    workers = clip_workers(config)
+    return None if workers == 1 else max(1, (os.cpu_count() or workers) // workers)
 
 
 MANIFEST = "manifest.json"
@@ -177,7 +201,9 @@ def _clip_hash(clip: ClipSpec) -> str:
 
 
 def _entry(clip: ClipSpec, config: ClipConfig, captions: str | None) -> dict[str, str]:
-    entry = {"clip": _clip_hash(clip), "config": _hash(config.model_dump(mode="json"))}
+    # max_workers doesn't change the output (and leaving it out keeps older hashes valid).
+    settings = config.model_dump(mode="json", exclude={"max_workers"})
+    entry = {"clip": _clip_hash(clip), "config": _hash(settings)}
     if captions is not None:
         # The caption track's content: re-transcribing or restyling re-cuts the clip.
         entry["captions"] = _hash(captions)
@@ -231,13 +257,15 @@ class ClipStage:
             raise ArtifactError(f"missing artifact: {job.input_video}")
         clips = job.read_clips()
         resolved: list[Path | RemoteVideo] = []
+        lock = threading.Lock()  # guards ``resolved`` and ``manifest`` across workers
 
         def video() -> Path | RemoteVideo:
             # Resolved once, on the first clip that needs cutting: a link job's stream
             # URL is only fetched when there's work to do (and it expires anyway).
-            if not resolved:
-                resolved.append(self.source(job))
-            return resolved[0]
+            with lock:
+                if not resolved:
+                    resolved.append(self.source(job))
+                return resolved[0]
 
         paths = clip_paths(job, clips)
         job.clips_dir.mkdir(parents=True, exist_ok=True)
@@ -251,26 +279,30 @@ class ClipStage:
         transcript = job.read_transcript() if burn else None
         style = CaptionStyle.from_config(config.caption)
 
+        todo: list[_Cut] = []
         for clip, path in zip(clips, paths, strict=True):
             ass = build_ass(transcript, clip, style) if transcript is not None else None
             entry = _entry(clip, config.clip, ass)
             if not self.force and path.exists() and manifest.get(path.name) == entry:
                 continue
             manifest.pop(path.name, None)
-            ass_path = captions_path(path)
-            if ass is None:
+            todo.append(_Cut(clip, path, entry, ass))
+
+        def cut(item: _Cut) -> None:
+            ass_path = captions_path(item.path)
+            if item.ass is None:
                 ass_path.unlink(missing_ok=True)
-                self.clipper(video(), [clip], [path], config.clip)
+                self.clipper(video(), [item.clip], [item.path], config.clip)
             else:
                 # Burn from a temp file and move it into place only once the clip is cut,
                 # so a failed encode never leaves a .ass that doesn't match its .mp4.
                 tmp = ass_path.with_name(f".{ass_path.name}.tmp")
-                tmp.write_bytes(ass.encode("utf-8-sig"))  # BOM: libass reads it anywhere
+                tmp.write_bytes(item.ass.encode("utf-8-sig"))  # BOM: libass reads it anywhere
                 try:
                     self.clipper(
                         video(),
-                        [clip],
-                        [path],
+                        [item.clip],
+                        [item.path],
                         config.clip,
                         extra_filter=subtitles_filter(tmp),
                     )
@@ -278,8 +310,17 @@ class ClipStage:
                 except BaseException:
                     tmp.unlink(missing_ok=True)
                     raise
-            manifest[path.name] = entry
-            _write_manifest(job, manifest)  # after every clip, so a crash loses at most one
+            with lock:
+                manifest[item.path.name] = item.entry
+                # After every clip, so a crash only loses the clips still encoding.
+                _write_manifest(job, manifest)
+
+        workers = min(clip_workers(config.clip), len(todo))
+        if workers <= 1:
+            for item in todo:
+                cut(item)
+        else:
+            _run_parallel(cut, todo, workers)
 
         # Delete clips written for a previous clips.json that are no longer wanted.
         for name in set(manifest) - {p.name for p in paths}:
@@ -287,6 +328,34 @@ class ClipStage:
             captions_path(job.clips_dir / name).unlink(missing_ok=True)
             del manifest[name]
         _write_manifest(job, manifest)
+
+
+@dataclass(frozen=True)
+class _Cut:
+    """A clip ``ClipStage.run`` has to (re-)encode."""
+
+    clip: ClipSpec
+    path: Path
+    entry: dict[str, str]
+    ass: str | None
+
+
+def _run_parallel(cut: Callable[[_Cut], None], todo: list[_Cut], workers: int) -> None:
+    """Run ``cut`` for every clip on ``workers`` threads (each one waits on an ffmpeg).
+
+    The first failure stops new clips from starting; clips already encoding finish and
+    keep their manifest entries, then the error of the earliest failed clip is raised.
+    """
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="clip")
+    try:
+        futures = [pool.submit(cut, item) for item in todo]
+        wait(futures, return_when=FIRST_EXCEPTION)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+    for future in futures:
+        error = None if future.cancelled() else future.exception()
+        if error is not None:
+            raise error
 
 
 def _read_manifest(job: Job) -> dict[str, dict[str, str]]:

@@ -1,5 +1,7 @@
 import http.server
+import json
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,7 +16,9 @@ from echo.clip import (
     build_ffmpeg_args,
     captions_path,
     clip_paths,
+    clip_workers,
     cut_clips,
+    encoder_threads,
 )
 from echo.config import CaptionConfig, ClipConfig, PipelineConfig
 from echo.errors import ArtifactError, ExternalToolError, InvalidInputError
@@ -47,6 +51,14 @@ class RecordingClipper:
     def cut(self) -> list[tuple[ClipSpec, Path]]:
         """Every (clip, output) cut, across calls."""
         return [pair for clips, outs in self.calls for pair in zip(clips, outs, strict=True)]
+
+
+@pytest.fixture(autouse=True)
+def _sequential_by_default(monkeypatch):
+    """With 2 CPUs the automatic ``max_workers`` is 1, so the tests below that use
+    ``RecordingClipper`` (not thread-safe, call-order asserts) stay sequential. The
+    parallel tests (#57) set ``ClipConfig.max_workers`` explicitly."""
+    monkeypatch.setattr(clip_module.os, "cpu_count", lambda: 2)
 
 
 def _job_with_video(job_copy: Job) -> Job:
@@ -693,3 +705,119 @@ def test_cut_from_a_remote_http_video(make_video, tmp_path):
     info = probe(out)
     assert (info.width, info.height) == TARGET and info.has_audio
     assert info.duration == pytest.approx(spec.duration, abs=0.1)
+
+
+# --- parallel clips (#57) -----------------------------------------------------------------
+
+
+@dataclass
+class SlowClipper:
+    """Thread-safe fake ``Clipper`` with a per-clip delay; can fail on given titles."""
+
+    delay: float = 0.05
+    fail_titles: frozenset[str] = frozenset()
+    started: list[str] = field(default_factory=list)
+    finished: list[str] = field(default_factory=list)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def __call__(self, video, clips, outputs, config, *, extra_filter=None) -> None:
+        (clip,) = clips
+        with self.lock:
+            self.started.append(clip.topic_title)
+        time.sleep(self.delay * (1 + int(clip.topic_title.split()[-1]) % 3))  # uneven finish order
+        if clip.topic_title in self.fail_titles:
+            raise ExternalToolError(f"boom on {clip.topic_title}")
+        for out in outputs:
+            out.write_bytes(clip.topic_title.encode())
+        with self.lock:
+            self.finished.append(clip.topic_title)
+
+
+def _many_clips(job: Job, n: int = 8) -> Job:
+    _job_with_video(job)
+    job.write_clips([ClipSpec.between(f"Clip {i}", 5.0 * i, 5.0 * i + 4) for i in range(n)])
+    return job
+
+
+def _clip_config(workers: int, **caption) -> PipelineConfig:
+    return PipelineConfig(clip=ClipConfig(max_workers=workers), **caption)
+
+
+@pytest.mark.parametrize(("cpus", "expected"), [(1, 1), (2, 1), (4, 2), (8, 4), (32, 4)])
+def test_clip_workers_default(monkeypatch, cpus: int, expected: int):
+    monkeypatch.setattr(clip_module.os, "cpu_count", lambda: cpus)
+    assert clip_workers(ClipConfig()) == expected
+    assert clip_workers(ClipConfig(max_workers=3)) == 3
+
+
+def test_encoder_threads_share_the_cores(monkeypatch):
+    monkeypatch.setattr(clip_module.os, "cpu_count", lambda: 16)
+    assert encoder_threads(ClipConfig(max_workers=1)) is None  # ffmpeg decides
+    assert encoder_threads(ClipConfig(max_workers=4)) == 4
+    spec = ClipSpec.between("t", 0, 2)
+    args = build_ffmpeg_args(Path("in.mp4"), spec, Path("out"), ClipConfig(), threads=4)
+    assert args[args.index("-threads") + 1] == "4"
+    assert "-threads" not in build_ffmpeg_args(Path("in.mp4"), spec, Path("out"), ClipConfig())
+
+
+def test_max_workers_is_not_in_the_fingerprint(job_copy):
+    """Changing the worker count must not re-cut finished clips."""
+    job = _many_clips(job_copy, 3)
+    ClipStage(clipper=SlowClipper(delay=0)).run(job, _clip_config(1))
+    again = SlowClipper(delay=0)
+    ClipStage(clipper=again).run(job, _clip_config(4))
+    assert again.started == []
+
+
+def test_parallel_matches_sequential(job_copy, tmp_path):
+    results = []
+    for workers in (1, 4):
+        job = Job(tmp_path / f"job-{workers}")
+        job.root.mkdir()
+        for name in ("transcript.json", "clips.json", "job.json"):
+            (job.root / name).write_bytes((job_copy.root / name).read_bytes())
+        _many_clips(job)
+        clipper = SlowClipper()
+        ClipStage(clipper=clipper).run(job, _clip_config(workers))
+        files = {p.name: p.read_bytes() for p in job.clips_dir.iterdir()}
+        results.append((files, json.loads((job.clips_dir / MANIFEST).read_text())))
+    assert results[0] == results[1]
+    assert len(results[0][1]) == 8
+
+
+def test_parallel_crash_then_rerun_cuts_only_unfinished_clips(job_copy):
+    job = _many_clips(job_copy)
+    crashed = SlowClipper(fail_titles=frozenset({"Clip 3"}))
+    with pytest.raises(ExternalToolError, match="Clip 3"):
+        ClipStage(clipper=crashed).run(job, _clip_config(3))
+    assert "Clip 3" not in crashed.finished and len(crashed.started) < 8, "queued clips cancelled"
+    assert _leftovers(job.clips_dir) == []
+
+    rerun = SlowClipper()
+    ClipStage(clipper=rerun).run(job, _clip_config(3))
+    every = {f"Clip {i}" for i in range(8)}
+    assert set(rerun.started) == every - set(crashed.finished)
+    assert all(p.exists() for p in _paths(job))
+
+
+def test_parallel_failure_reports_the_earliest_failed_clip(job_copy):
+    job = _many_clips(job_copy, 4)
+    with pytest.raises(ExternalToolError, match="Clip 1"):
+        ClipStage(clipper=SlowClipper(fail_titles=frozenset({"Clip 1", "Clip 2"}))).run(
+            job, _clip_config(4)
+        )
+
+
+@pytest.mark.ffmpeg
+def test_real_ffmpeg_four_clips_on_two_workers(make_video, tmp_path):
+    job = Job(tmp_path / "job")
+    job.root.mkdir()
+    make_video(duration=9, name="src.mp4").replace(job.input_video)
+    job.write_clips([ClipSpec.between(f"Part {i}", 2.0 * i, 2.0 * i + 1.5) for i in range(4)])
+    ClipStage().run(job, _no_captions(clip=ClipConfig(max_workers=2)))
+    for spec, out in zip(job.read_clips(), _paths(job), strict=True):
+        info = probe(out)
+        assert (info.width, info.height) == TARGET
+        assert info.duration == pytest.approx(spec.duration, abs=0.1)
+    assert len(json.loads((job.clips_dir / MANIFEST).read_text())) == 4
+    assert _leftovers(job.clips_dir) == []
