@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from echo.config import PipelineConfig, RefineConfig
+from echo.config import LLMConfig, PipelineConfig, RefineConfig
 from echo.errors import ArtifactError, InvalidInputError, LLMError
 from echo.interfaces import LLMClient
 from echo.job import Job, slugify
@@ -256,3 +256,10 @@ def test_refine_max_clips_and_caption_font_defaults():
     with pytest.raises(ValidationError):
         RefineConfig(max_clips=0)
     assert CaptionConfig().font == "Montserrat ExtraBold"
+
+
+def test_llm_max_concurrency_defaults_to_auto():
+    assert LLMConfig().max_concurrency is None  # 4 hosted, 1 Ollama (resolved by the stage)
+    assert LLMConfig(max_concurrency=1).max_concurrency == 1
+    with pytest.raises(ValidationError):
+        LLMConfig(max_concurrency=0)

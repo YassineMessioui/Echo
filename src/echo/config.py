@@ -36,6 +36,13 @@ class LLMConfig(_Section):
     temperature: float = 0.0
     timeout_s: float = 120.0
     max_retries: int = Field(default=2, ge=0)
+    max_concurrency: int | None = Field(
+        default=None,
+        ge=1,
+        description="Transcript windows sent to the LLM at once (#56). None = 4 for hosted "
+        "providers, 1 for Ollama (a local server queues requests, and queued ones could "
+        "time out); 1 = one after another.",
+    )
 
 
 class RefineConfig(_Section):
