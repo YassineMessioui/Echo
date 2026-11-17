@@ -28,7 +28,7 @@ or on a **hosted API**. Pick one with `llm.provider` in `PipelineConfig`
   (a local server queues requests anyway, and queued ones could reach `llm.timeout_s`).
   A rate limit (HTTP 429) is retried up to 5 times, waiting the server's `retry-after`
   (1, 2, 4, … s without one); a wait over 60 s (e.g. a daily quota) fails right away.
-  If a free tier keeps limiting you, set `llm.max_concurrency = 1`.
+  If a free tier keeps limiting you, pass `--llm-concurrency 1`.
 
 ## Local: Ollama
 

@@ -24,6 +24,7 @@ resumes that job instead of downloading it again. YouTube needs a JavaScript run
 | `--language TEXT` | auto-detect | `TranscribeConfig.language` |
 | `--llm-provider TEXT` | `ollama` | `LLMConfig.provider` (see [llm-providers.md](llm-providers.md)) |
 | `--llm-model TEXT` | `llama3.2:3b` | `LLMConfig.model` |
+| `--llm-concurrency INT` | 4 hosted, 1 Ollama | `LLMConfig.max_concurrency` (1–16): transcript windows sent to the LLM at once; use 1 if a free tier keeps rate-limiting you |
 | `--min-duration FLOAT` | `15` | `RefineConfig.min_duration` (seconds) |
 | `--max-duration FLOAT` | `60` | `RefineConfig.max_duration` (seconds; 60 is the platform cap) |
 | `--max-clips INT` | all | `RefineConfig.max_clips`: keep the N clips closest to ~37 s, in time order. Changing it on an existing job needs `--from-stage refine` |

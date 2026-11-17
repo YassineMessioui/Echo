@@ -222,6 +222,16 @@ def run(
         str, typer.Option(help="LLM provider (see docs/llm-providers.md).")
     ] = _D.llm.provider,
     llm_model: Annotated[str, typer.Option(help="LLM model name.")] = _D.llm.model,
+    llm_concurrency: Annotated[
+        int | None,
+        typer.Option(
+            min=1,
+            max=16,
+            help="Transcript windows sent to the LLM at once "
+            "(default: 4 for hosted providers, 1 for Ollama).",
+            show_default=False,
+        ),
+    ] = _D.llm.max_concurrency,
     min_duration: Annotated[
         float, typer.Option(help="Shortest clip, in seconds.")
     ] = _D.refine.min_duration,
@@ -257,7 +267,7 @@ def run(
     config = _build_config(
         jobs_dir=jobs_dir,
         transcribe={"model_size": whisper_model, "language": language},
-        llm={"provider": llm_provider, "model": llm_model},
+        llm={"provider": llm_provider, "model": llm_model, "max_concurrency": llm_concurrency},
         refine={
             "min_duration": min_duration,
             "max_duration": max_duration,

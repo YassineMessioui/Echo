@@ -4,7 +4,7 @@ chunking → extraction → merging over a whole transcript."""
 from __future__ import annotations
 
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
@@ -32,18 +32,24 @@ def extract_all(
 ) -> list[list[Topic]]:
     """``extractor.extract`` for every window, up to ``workers`` at a time (#56).
 
-    Results are in window order, so merging is deterministic. The first error (in window
-    order) is raised and the windows not started yet are cancelled; calls already in
-    flight finish first, since a thread can't be interrupted.
+    Results are in window order, so merging is deterministic. As soon as any window
+    fails, the windows not started yet are cancelled (a dead provider doesn't get every
+    request); calls already in flight finish, since a thread can't be interrupted. The
+    error raised is the one from the lowest failed window, so the message is stable.
     """
     if workers <= 1 or len(windows) <= 1:
         return [extractor.extract(window) for window in windows]
     pool = ThreadPoolExecutor(max_workers=min(workers, len(windows)), thread_name_prefix="llm")
     try:
         futures = [pool.submit(extractor.extract, window) for window in windows]
-        return [future.result() for future in futures]
+        wait(futures, return_when=FIRST_EXCEPTION)
     finally:
         pool.shutdown(wait=True, cancel_futures=True)
+    for future in futures:
+        error = None if future.cancelled() else future.exception()
+        if error is not None:
+            raise error
+    return [future.result() for future in futures]
 
 
 DEFAULT_IOU_THRESHOLD = 0.5

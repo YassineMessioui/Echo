@@ -13,10 +13,14 @@ the provider's own variable (e.g. ``GROQ_API_KEY``).
 from __future__ import annotations
 
 import logging
+import math
 import os
+import random
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -26,10 +30,22 @@ from echo.errors import LLMError
 
 logger = logging.getLogger(__name__)
 
-RATE_LIMIT_RETRIES = 5
-"""HTTP 429 answers retried per request before giving up (#56)."""
-MAX_RATE_LIMIT_WAIT_S = 60.0
-"""A longer ``retry-after`` (e.g. a daily quota) is not waited out: the 429 is raised."""
+RETRY_STATUSES = frozenset({429, 502, 503, 504})
+"""Rate limited, or the provider is overloaded ("model is experiencing high demand")."""
+MAX_RETRIES = 5
+"""Retries per request for ``RETRY_STATUSES`` (#56)."""
+TIMEOUT_RETRIES = 1
+"""Retries for a timeout or dropped connection: each one already cost up to ``timeout_s``."""
+MAX_RETRY_WAIT_S = 60.0
+"""A longer ``retry-after`` (e.g. a daily quota) is not waited out: the error is raised."""
+MAX_TOTAL_WAIT_S = 120.0
+"""Most time one request spends sleeping between retries."""
+
+
+def _jitter(seconds: float) -> float:
+    """Spread backoffs so parallel workers limited together don't retry together."""
+    return seconds * random.uniform(0.5, 1.5)
+
 
 API_KEY_ENV = "ECHO_LLM_API_KEY"
 """Overrides the provider-specific API key variable."""
@@ -88,10 +104,11 @@ class OpenAICompatibleClient:
     requested; the caller still validates the answer. If the server rejects JSON mode,
     the request is repeated without it once and JSON mode stays off for this client.
 
-    HTTP 429 (rate limit) is retried up to ``RATE_LIMIT_RETRIES`` times, waiting for the
-    server's ``retry-after`` (or 1, 2, 4, … s without one). Parallel window extraction
-    (#56) hits the free tiers' per-minute limits. The client is safe to share between
-    threads (``httpx.Client`` is).
+    Rate limits and overload (HTTP 429/502/503/504) are retried up to ``MAX_RETRIES``
+    times, waiting for the server's ``retry-after`` or about 1, 2, 4, … s (jittered);
+    a timeout or dropped connection is retried once. Parallel window extraction (#56)
+    makes both more likely on free tiers. The client is safe to share between threads
+    (``httpx.Client`` is).
     """
 
     def __init__(
@@ -106,9 +123,11 @@ class OpenAICompatibleClient:
         key_env: str = API_KEY_ENV,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        jitter: Callable[[float], float] = _jitter,
     ) -> None:
         self.provider = provider
         self._sleep = sleep
+        self._jitter = jitter
         self.model = model
         self.model_name = f"{provider}/{model}"
         self.temperature = temperature
@@ -195,36 +214,55 @@ class OpenAICompatibleClient:
     # --- helpers ---------------------------------------------------------------------
 
     def _post(self, body: dict[str, Any]) -> httpx.Response:
-        for attempt in range(RATE_LIMIT_RETRIES + 1):
-            response = self._post_once(body)
-            if response.status_code != 429 or attempt == RATE_LIMIT_RETRIES:
-                return response
-            wait = _retry_after(response)
-            if wait is None:
-                wait = float(2**attempt)
-            elif wait > MAX_RATE_LIMIT_WAIT_S:
-                return response  # a quota, not a burst: report it instead of waiting
-            logger.info("%s rate limit (HTTP 429); retrying in %.1f s", self.provider, wait)
+        waited = 0.0
+        timeouts = 0
+        for attempt in range(1, MAX_RETRIES + 2):  # attempt n is retry n - 1
+            try:
+                response = self._http.post("chat/completions", json=body)
+            except (httpx.TimeoutException, httpx.RemoteProtocolError) as e:
+                wait = self._jitter(2.0 ** (attempt - 1))
+                if timeouts >= TIMEOUT_RETRIES or waited + wait > MAX_TOTAL_WAIT_S:
+                    raise self._transport_error(e, retries=attempt - 1) from e
+                timeouts += 1
+                reason = "request timed out" if isinstance(e, httpx.TimeoutException) else str(e)
+            except httpx.HTTPError as e:
+                raise self._transport_error(e, retries=attempt - 1) from e
+            else:
+                if response.status_code not in RETRY_STATUSES:
+                    return response
+                server_wait = _retry_after(response)
+                wait = self._jitter(2.0 ** (attempt - 1)) if server_wait is None else server_wait
+                if (
+                    attempt > MAX_RETRIES
+                    or wait > MAX_RETRY_WAIT_S  # a quota, not a burst: report it now
+                    or waited + wait > MAX_TOTAL_WAIT_S
+                ):
+                    self._raise_for_status(response, retries=attempt - 1)
+                reason = f"HTTP {response.status_code}"
+            logger.warning(
+                "%s: %s; retry %d/%d in %.1f s", self.provider, reason, attempt, MAX_RETRIES, wait
+            )
             self._sleep(wait)
+            waited += wait
         raise AssertionError("unreachable")
 
-    def _post_once(self, body: dict[str, Any]) -> httpx.Response:
-        try:
-            return self._http.post("chat/completions", json=body)
-        except httpx.ConnectError as e:
-            raise LLMError(f"cannot reach {self.provider} at {self._http.base_url}: {e}") from e
-        except httpx.TimeoutException as e:
-            raise LLMError(
+    def _transport_error(self, e: httpx.HTTPError, *, retries: int) -> LLMError:
+        gave_up = f" (gave up after {retries} retries)" if retries else ""
+        if isinstance(e, httpx.ConnectError):
+            return LLMError(f"cannot reach {self.provider} at {self._http.base_url}: {e}")
+        if isinstance(e, httpx.TimeoutException):
+            return LLMError(
                 f"{self.provider} request timed out after {self._http.timeout.read:g}s "
-                f"(model {self.model!r}); raise llm.timeout_s"
-            ) from e
-        except httpx.HTTPError as e:
-            raise LLMError(f"{self.provider} request failed: {e}") from e
+                f"(model {self.model!r}){gave_up}; raise llm.timeout_s"
+            )
+        return LLMError(f"{self.provider} request failed: {e}{gave_up}")
 
-    def _raise_for_status(self, response: httpx.Response) -> None:
+    def _raise_for_status(self, response: httpx.Response, *, retries: int = 0) -> None:
         if not response.is_error:
             return
         detail = _error_message(response)
+        if retries:
+            detail += f" (gave up after {retries} retries)"
         status = response.status_code
         if status in (401, 403) or (status == 400 and "api key" in detail.lower()):
             raise LLMError(
@@ -237,18 +275,28 @@ class OpenAICompatibleClient:
                 f"Set llm.model to a model this provider serves"
             )
         if status == 429:
-            wait = response.headers.get("retry-after")
-            hint = f"; retry after {wait}s" if wait else ""
+            wait = _retry_after(response)
+            hint = f"; retry after {math.ceil(wait)}s" if wait is not None else ""
             raise LLMError(f"{self.provider} rate limit reached (HTTP 429){hint}: {detail}")
         raise LLMError(f"{self.provider} returned HTTP {status}: {detail}")
 
 
 def _retry_after(response: httpx.Response) -> float | None:
-    """``retry-after`` in seconds (only the seconds form; HTTP dates are rare here)."""
-    try:
-        return max(float(response.headers["retry-after"]), 0.0)
-    except (KeyError, ValueError):
+    """``retry-after`` in seconds: either form, delay-seconds or an HTTP date."""
+    value = response.headers.get("retry-after")
+    if value is None:
         return None
+    try:
+        return max(float(value), 0.0)
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max((when - datetime.now(UTC)).total_seconds(), 0.0)
 
 
 def _error_message(response: httpx.Response) -> str:

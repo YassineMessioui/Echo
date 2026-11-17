@@ -267,3 +267,28 @@ def test_first_error_cancels_windows_not_started():
         extract_all(extractor, windows, workers=2)
     assert len(extractor.started) < 12, "queued windows were cancelled"
     assert extractor.in_flight == 0, "calls in flight finished before raising"
+
+
+def test_error_in_a_later_window_stops_new_windows_without_waiting_for_window_0():
+    """Review case: window 0 is slow, window 3 fails fast; the rest must not start."""
+    extractor = _SlowExtractor(delay=lambda w: 1.0 if w.start_segment == 0 else 0.05, fail_at=30)
+    windows = [TranscriptWindow(start_segment=s, end_segment=e, text="") for s, e in _windows(15)]
+    with pytest.raises(LLMError, match="window 30"):
+        extract_all(extractor, windows, workers=4)
+    assert len(extractor.started) <= 8, f"started {sorted(extractor.started)}"
+
+
+class _TwoFailures:
+    """Window 10 fails slowly, window 20 fails at once: window 10's error is reported."""
+
+    def extract(self, window: TranscriptWindow) -> list[Topic]:
+        time.sleep(0.2 if window.start_segment == 10 else 0.0)
+        if window.start_segment in (10, 20):
+            raise LLMError(f"provider down at window {window.start_segment}")
+        return []
+
+
+def test_lowest_failed_window_is_reported():
+    windows = [TranscriptWindow(start_segment=s, end_segment=e, text="") for s, e in _windows(3)]
+    with pytest.raises(LLMError, match="window 10"):
+        extract_all(_TwoFailures(), windows, workers=3)

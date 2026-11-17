@@ -31,7 +31,8 @@ def _client(handler, config: LLMConfig | None = None, env: dict | None = None):
         env={"GROQ_API_KEY": "gsk-test"} if env is None else env,
         transport=httpx.MockTransport(record),
     )
-    client._sleep = SLEPT.append  # no real waiting on HTTP 429 retries
+    client._sleep = SLEPT.append  # no real waiting on retries
+    client._jitter = lambda seconds: seconds  # exact backoffs in tests
     return client, seen
 
 
@@ -215,14 +216,74 @@ def test_429_without_retry_after_backs_off_exponentially():
 
 
 def test_429_gives_up_after_the_retry_budget():
-    from echo.llm.hosted import RATE_LIMIT_RETRIES
+    from echo.llm.hosted import MAX_RETRIES
 
     SLEPT.clear()
     client, seen = _client(_limited(100, "2"))
-    with pytest.raises(LLMError, match=r"rate limit reached \(HTTP 429\); retry after 2s"):
+    with pytest.raises(LLMError, match=r"retry after 2s: slow \(gave up after 5 retries\)"):
         client.complete("s", "p")
-    assert len(seen) == RATE_LIMIT_RETRIES + 1
-    assert SLEPT == [2.0] * RATE_LIMIT_RETRIES
+    assert len(seen) == MAX_RETRIES + 1
+    assert SLEPT == [2.0] * MAX_RETRIES
+
+
+@pytest.mark.parametrize("status", [502, 503, 504])
+def test_overloaded_provider_is_retried(status: int):
+    """Gemini's free tier: 503 "model is currently experiencing high demand"."""
+    SLEPT.clear()
+    responses = [httpx.Response(status, json={"error": {"message": "high demand"}}), _ok("{}")]
+    client, seen = _client(lambda r: responses.pop(0))
+    assert client.complete("s", "p") == "{}"
+    assert len(seen) == 2 and SLEPT == [1.0]
+
+
+@pytest.mark.parametrize(
+    "error", [httpx.ReadTimeout("slow"), httpx.RemoteProtocolError("server disconnected")]
+)
+def test_timeout_or_dropped_connection_is_retried_once(error: httpx.HTTPError):
+    SLEPT.clear()
+    outcomes: list = [error, _ok("{}")]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    client, _ = _client(handler)
+    assert client.complete("s", "p") == "{}"
+    assert SLEPT == [1.0]
+
+
+def test_second_timeout_is_raised():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow")
+
+    client, seen = _client(handler)
+    with pytest.raises(LLMError, match=r"timed out.*gave up after 1 retries.*llm.timeout_s"):
+        client.complete("s", "p")
+    assert len(seen) == 2
+
+
+def test_retry_after_as_http_date():
+    from datetime import UTC, datetime, timedelta
+    from email.utils import format_datetime
+
+    SLEPT.clear()
+    when = format_datetime(datetime.now(UTC) + timedelta(seconds=30), usegmt=True)
+    client, _ = _client(_limited(1, when))
+    assert client.complete("s", "p") == "{}"
+    assert 28 <= SLEPT[0] <= 30
+
+
+def test_total_wait_is_capped():
+    from echo.llm.hosted import MAX_TOTAL_WAIT_S
+
+    SLEPT.clear()
+    client, seen = _client(_limited(100, "50"))  # each wait allowed, but not all of them
+    with pytest.raises(LLMError, match="gave up after 2 retries"):
+        client.complete("s", "p")
+    assert SLEPT == [50.0, 50.0] and sum(SLEPT) <= MAX_TOTAL_WAIT_S
+    assert len(seen) == 3
 
 
 def test_429_on_json_mode_is_retried_before_the_json_fallback():
