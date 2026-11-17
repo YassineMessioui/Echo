@@ -3,16 +3,71 @@ chunking → extraction → merging over a whole transcript."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
 from echo import progress
-from echo.config import PipelineConfig
+from echo.config import LLMConfig, PipelineConfig
 from echo.interfaces import Chunker, TopicExtractor, TopicMerger
 from echo.job import Job
-from echo.models import StageName, Topic
+from echo.models import StageName, Topic, TranscriptWindow
+
+HOSTED_CONCURRENCY = 4
+"""``LLMConfig.max_concurrency = None`` for a hosted provider."""
+
+
+def concurrency(config: LLMConfig) -> int:
+    """How many windows go to the LLM at once: the configured value, else 4 for hosted
+    providers and 1 for Ollama (a local server queues requests, so parallel calls gain
+    little and the queued ones can hit ``timeout_s``)."""
+    if config.max_concurrency is not None:
+        return config.max_concurrency
+    return 1 if config.provider == "ollama" else HOSTED_CONCURRENCY
+
+
+def extract_all(
+    extractor: TopicExtractor,
+    windows: list[TranscriptWindow],
+    workers: int,
+    *,
+    on_done: Callable[[int], None] | None = None,
+) -> list[list[Topic]]:
+    """``extractor.extract`` for every window, up to ``workers`` at a time (#56).
+
+    Results are in window order, so merging is deterministic. ``on_done(n)`` is called
+    from this thread each time another window finishes (``n`` = windows done so far), so
+    ``echo.progress`` reports reach the pipeline (#61). As soon as any window fails, the
+    windows not started yet are cancelled (a dead provider doesn't get every request);
+    calls already in flight finish, since a thread can't be interrupted. The error raised
+    is the one from the lowest failed window, so the message is stable.
+    """
+    report = on_done or (lambda done: None)
+    if workers <= 1 or len(windows) <= 1:
+        results = []
+        for window in windows:
+            results.append(extractor.extract(window))
+            report(len(results))
+        return results
+    pool = ThreadPoolExecutor(max_workers=min(workers, len(windows)), thread_name_prefix="llm")
+    try:
+        futures = [pool.submit(extractor.extract, window) for window in windows]
+        done = 0
+        for future in as_completed(futures):
+            if future.exception() is not None:
+                break  # cancel the rest below
+            done += 1
+            report(done)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+    for future in futures:
+        error = None if future.cancelled() else future.exception()
+        if error is not None:
+            raise error
+    return [future.result() for future in futures]
+
 
 DEFAULT_IOU_THRESHOLD = 0.5
 DEFAULT_CONTAINMENT_THRESHOLD = 0.8
@@ -123,12 +178,13 @@ class LLMStage:
     def run(self, job: Job, config: PipelineConfig) -> None:
         transcript = job.read_transcript()
         windows = self.chunker(transcript, config.chunk)
-        per_window: list[list[Topic]] = []
-        for window in windows:
-            per_window.append(self.extractor.extract(window))
-            # Windows done / total, from this thread (works as futures complete, too).
-            done = len(per_window)
+
+        def window_done(done: int) -> None:
             progress.report(done / len(windows), f"window {done}/{len(windows)}")
+
+        per_window = extract_all(
+            self.extractor, windows, concurrency(config.llm), on_done=window_done
+        )
         job.write_topics(self.merger(per_window))
         if self.models:
             meta = job.read_meta()

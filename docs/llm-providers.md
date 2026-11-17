@@ -23,6 +23,12 @@ or on a **hosted API**. Pick one with `llm.provider` in `PipelineConfig`
 - Groq, OpenRouter, Gemini and Mistral have free tiers with rate limits. Free tiers
   change often, so check the provider's page. Some (e.g. Gemini's free tier) may
   use your prompts to improve their models: transcripts are sent to the provider.
+- Long transcripts are split into windows that go to the LLM **in parallel**:
+  `llm.max_concurrency` at a time, by default 4 for hosted providers and 1 for Ollama
+  (a local server queues requests anyway, and queued ones could reach `llm.timeout_s`).
+  A rate limit (HTTP 429) is retried up to 5 times, waiting the server's `retry-after`
+  (1, 2, 4, … s without one); a wait over 60 s (e.g. a daily quota) fails right away.
+  If a free tier keeps limiting you, pass `--llm-concurrency 1`.
 
 ## Window size (`chunk.max_tokens`)
 

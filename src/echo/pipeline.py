@@ -33,6 +33,7 @@ Behaviour of ``run_pipeline``:
 from __future__ import annotations
 
 import dataclasses
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -138,11 +139,13 @@ class _LazyTopicExtractor:
     def __init__(self, config: LLMConfig) -> None:
         self._config = config
         self._real: LLMTopicExtractor | None = None
+        self._lock = threading.Lock()  # windows are extracted from several threads (#56)
 
     def _get(self) -> LLMTopicExtractor:
-        if self._real is None:
-            self._real = LLMTopicExtractor(make_llm_client(self._config), self._config)
-        return self._real
+        with self._lock:
+            if self._real is None:
+                self._real = LLMTopicExtractor(make_llm_client(self._config), self._config)
+            return self._real
 
     @property
     def model_name(self) -> str:

@@ -159,6 +159,7 @@ def test_options_map_to_config_fields(fake, video, jobs_dir):
         "--language", "fr",
         "--llm-provider", "groq",
         "--llm-model", "openai/gpt-oss-120b",
+        "--llm-concurrency", "2",
         "--min-duration", "20",
         "--max-duration", "45",
         "--max-clips", "3",
@@ -171,6 +172,7 @@ def test_options_map_to_config_fields(fake, video, jobs_dir):
     assert c.jobs_dir == jobs_dir
     assert (c.transcribe.model_size, c.transcribe.language) == ("medium", "fr")
     assert (c.llm.provider, c.llm.model) == ("groq", "openai/gpt-oss-120b")
+    assert c.llm.max_concurrency == 2
     assert (c.refine.min_duration, c.refine.max_duration) == (20.0, 45.0)
     assert c.refine.max_clips == 3
     assert (c.clip.aspect, c.clip.crop_x, c.clip.background) == ("source", 0.25, "black")
