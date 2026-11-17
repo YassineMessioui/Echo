@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
+from echo import progress
 from echo.captions import CaptionStyle, build_ass, chain_filters, subtitles_filter
 from echo.config import ClipConfig, PipelineConfig
 from echo.download import video_source
@@ -251,10 +252,14 @@ class ClipStage:
         transcript = job.read_transcript() if burn else None
         style = CaptionStyle.from_config(config.caption)
 
-        for clip, path in zip(clips, paths, strict=True):
+        def clip_done(done: int) -> None:  # skipped (up-to-date) clips count as done
+            progress.report(done / len(clips), f"clip {done}/{len(clips)}")
+
+        for done, (clip, path) in enumerate(zip(clips, paths, strict=True), start=1):
             ass = build_ass(transcript, clip, style) if transcript is not None else None
             entry = _entry(clip, config.clip, ass)
             if not self.force and path.exists() and manifest.get(path.name) == entry:
+                clip_done(done)
                 continue
             manifest.pop(path.name, None)
             ass_path = captions_path(path)
@@ -280,6 +285,7 @@ class ClipStage:
                     raise
             manifest[path.name] = entry
             _write_manifest(job, manifest)  # after every clip, so a crash loses at most one
+            clip_done(done)
 
         # Delete clips written for a previous clips.json that are no longer wanted.
         for name in set(manifest) - {p.name for p in paths}:

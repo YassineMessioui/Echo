@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from echo import progress
 from echo.config import PipelineConfig, TranscribeConfig
 from echo.errors import ArtifactError, TranscriptionError
 from echo.job import Job
@@ -520,3 +521,33 @@ def test_failed_cpu_retry_keeps_the_cuda_error(audio: Path):
     )
     with pytest.raises(TranscriptionError, match=r"(?s)cublas64_12\.dll.*disk full"):
         transcriber.transcribe(audio)
+
+
+def test_reports_progress_per_segment(audio: Path):
+    model = FakeWhisperModel(
+        [_segment(0.0, 750.0, " a"), _segment(750.0, 2000.0, " b"), _segment(2000.0, 3400.0, " c")],
+        duration=3490.0,
+    )
+    transcriber, _ = _transcriber(model)
+    reports: list[tuple[float, str]] = []
+    with progress.capture(lambda fraction, detail: reports.append((fraction, detail))):
+        transcriber.transcribe(audio)
+    fractions = [f for f, _ in reports]
+    assert fractions == sorted(fractions)
+    assert fractions[0] == pytest.approx(750 / 3490)
+    assert reports[0][1] == "12:30 / 58:10"
+    assert reports[-1] == (1.0, "58:10 / 58:10")
+
+
+def test_progress_detail_shows_hours():
+    from echo.transcribe import _clock
+
+    assert [_clock(s) for s in (0, 59.9, 750, 3725)] == ["0:00", "0:59", "12:30", "1:02:05"]
+
+
+def test_progress_without_a_duration_still_ends_at_one(audio: Path):
+    transcriber, _ = _transcriber(FakeWhisperModel([], duration=0.0))
+    reports: list[tuple[float, str]] = []
+    with progress.capture(lambda fraction, detail: reports.append((fraction, detail))):
+        transcriber.transcribe(audio)
+    assert reports == [(1.0, "0:00 / 0:00")]
