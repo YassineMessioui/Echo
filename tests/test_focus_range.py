@@ -345,3 +345,27 @@ def test_changing_the_range_reruns_ingest_and_later_stages(make_video, tmp_path:
     run_pipeline(job, stages, PipelineConfig())  # back to the whole video
     assert log == list(StageName)
     assert RANGE_KEY not in job.read_meta().models
+
+
+@pytest.mark.parametrize(
+    ("spelling", "same_as"),
+    [
+        ("15.0%:85.00%", "15%:85%"),
+        ("0:85%", ":85%"),
+        ("0%:85%", ":85%"),
+        ("10:100%", "10:"),
+        ("120.0:3300", "120:3300"),
+    ],
+)
+def test_range_spellings_normalise_to_one_fingerprint(spelling, same_as):
+    from echo.cli import parse_range
+
+    assert parse_range(spelling) == parse_range(same_as)
+
+
+def test_whole_video_range_is_no_range():
+    from echo.cli import parse_range
+
+    assert parse_range("0%:100%") == {"start": None, "end": None}
+    assert parse_range("90.25:3600") == {"start": "90.25", "end": "3600"}
+    assert parse_range("1:123456789")["end"] == "123456789"

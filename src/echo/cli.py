@@ -132,6 +132,23 @@ def _usage_error(message: str) -> typer.Exit:
     return typer.Exit(2)
 
 
+def _normalise_point(point: str | None, *, is_end: bool) -> str | None:
+    """One spelling per point, so the same span keeps the same ingest fingerprint:
+    ``15.0%`` → ``15%``, ``0`` / ``0%`` start → none, ``100%`` end → none."""
+    if point is None:
+        return None
+    pct = point.endswith("%")
+    number = point.rstrip("%")
+    try:
+        value = float(number)
+    except ValueError:
+        return point  # malformed: IngestConfig reports it
+    if (value == 0 and not is_end) or (pct and value == 100 and is_end):
+        return None
+    text = str(int(value)) if value.is_integer() else repr(value)
+    return f"{text}%" if pct else text
+
+
 def parse_range(value: str | None) -> dict[str, str | None]:
     """``--range START:END`` → ``IngestConfig`` ``start`` / ``end`` (either may be empty).
 
@@ -147,6 +164,9 @@ def parse_range(value: str | None) -> dict[str, str | None]:
         raise _usage_error(
             f"invalid --range {value!r}: expected START:END, e.g. 15%:85%, 120:3300 or :85%"
         )
+    start, end = _normalise_point(start, is_end=False), _normalise_point(end, is_end=True)
+    if start is None and end is None:
+        return {"start": None, "end": None}  # e.g. 0%:100%: the whole video
     if start and end and start.endswith("%") == end.endswith("%"):
         try:
             inverted = float(start.rstrip("%")) >= float(end.rstrip("%"))
