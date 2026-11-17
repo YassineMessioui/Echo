@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from echo import progress
 from echo.config import ChunkConfig, LLMConfig, PipelineConfig
 from echo.errors import ArtifactError, LLMError
 from echo.interfaces import Stage
@@ -292,3 +293,46 @@ def test_lowest_failed_window_is_reported():
     windows = [TranscriptWindow(start_segment=s, end_segment=e, text="") for s, e in _windows(3)]
     with pytest.raises(LLMError, match="window 10"):
         extract_all(_TwoFailures(), windows, workers=3)
+
+
+def test_llm_stage_reports_windows_done(job_copy: Job):
+    spans = [(0, 2), (2, 4), (4, 6), (6, 7)]
+    extractor = _ScriptedExtractor({s: [] for s, _ in spans})
+    reports: list[tuple[float, str]] = []
+    with progress.capture(lambda fraction, detail: reports.append((fraction, detail))):
+        LLMStage(chunker=_fixed_chunker(spans), extractor=extractor).run(job_copy, PipelineConfig())
+    assert reports == [
+        (0.25, "window 1/4"),
+        (0.5, "window 2/4"),
+        (0.75, "window 3/4"),
+        (1.0, "window 4/4"),
+    ]
+
+
+def test_parallel_extraction_reports_progress_per_finished_window(job_copy: Job):
+    """#56 + #61: windows finish out of order on pool threads, but progress is reported
+    from the stage thread, once per finished window, and ends at 1.0."""
+    from echo.pipeline import run_pipeline
+
+    events = []
+    extractor = _SlowExtractor(delay=lambda w: 0.02 * (6 - w.start_segment // 10))
+    stage = LLMStage(chunker=_fixed_chunker(_windows(6)), extractor=extractor)
+    run_pipeline(
+        job_copy,
+        [stage],
+        PipelineConfig(llm=LLMConfig(max_concurrency=3)),
+        force=True,
+        on_event=events.append,
+    )
+    reports = [(e.progress, e.detail) for e in events if e.progress is not None]
+    assert [d for _, d in reports] == [f"window {n}/6" for n in range(1, 7)]
+    assert reports[-1][0] == 1.0
+
+
+def test_on_done_counts_only_successes_before_a_failure():
+    done: list[int] = []
+    extractor = _SlowExtractor(delay=lambda w: 0.05 * (w.start_segment // 10), fail_at=20)
+    windows = [TranscriptWindow(start_segment=s, end_segment=e, text="") for s, e in _windows(6)]
+    with pytest.raises(LLMError, match="window 20"):
+        extract_all(extractor, windows, workers=2, on_done=done.append)
+    assert done == list(range(1, len(done) + 1)) and len(done) < 6

@@ -35,6 +35,8 @@ def run(
 ) -> subprocess.CompletedProcess[str]:
     """Run ``tool`` with ``args``; raise ExternalToolError with the stderr tail on failure.
 
+    ``args`` are never logged or put in error messages (they can hold HTTP headers).
+
     Output is decoded as UTF-8 (what ffmpeg writes) rather than the locale encoding,
     which is cp1252 on Windows and would fail on non-ASCII paths or metadata.
     """
@@ -49,8 +51,10 @@ def run(
             timeout=timeout,
             check=False,
         )
-    except subprocess.TimeoutExpired as e:
-        raise ExternalToolError(f"{tool} timed out after {timeout} s") from e
+    except subprocess.TimeoutExpired:
+        # Not chained: TimeoutExpired's message is the whole argv, which can hold a
+        # remote clip's -headers. No error or log here ever includes argv.
+        raise ExternalToolError(f"{tool} timed out after {timeout} s") from None
     except OSError as e:
         raise ExternalToolError(f"could not run {tool}: {e}") from e
     if result.returncode != 0:

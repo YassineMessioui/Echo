@@ -409,3 +409,45 @@ def test_max_clips_defaults_to_all_and_rejects_zero(fake, video, jobs_dir):
     assert run(video, jobs_dir).exit_code == 0
     assert fake.config.refine.max_clips is None
     assert run(video, jobs_dir, "--max-clips", "0").exit_code == 2
+
+
+def _running(stage: StageName, fraction: float | None, detail: str = "") -> StageEvent:
+    return StageEvent(stage, StageStatus.RUNNING, progress=fraction, detail=detail)
+
+
+def test_piped_progress_is_plain_lines_every_10_percent(fake, video, jobs_dir):
+    fake.events = [
+        _running(StageName.TRANSCRIBE, None),
+        *(_running(StageName.TRANSCRIBE, i / 100, f"{i}s / 100s") for i in range(0, 101, 4)),
+        StageEvent(StageName.TRANSCRIBE, StageStatus.DONE, elapsed=3.0),
+    ]
+    result = run(video, jobs_dir)
+    assert "\r" not in result.stdout and "\x1b" not in result.stdout
+    lines = result.stdout.splitlines()
+    progress = [line for line in lines if "%" in line]
+    # 4% steps pass 10%, 20%, ... 100%: one line each.
+    assert [line.split()[2] for line in progress] == [
+        f"{p}%" for p in (12, 20, 32, 40, 52, 60, 72, 80, 92, 100)
+    ]
+    assert progress[0].startswith("[2/5] transcribe   12%  12s / 100s  ")
+    assert lines[len(progress)] == "[2/5] transcribe  done      3.0s"
+
+
+def test_tty_line_redraws_in_place():
+    event = _running(StageName.TRANSCRIBE, 0.215, "12:30 / 58:10")
+    line = cli._tty_line(event, 5, 31.04, width=80)
+    assert line == "\r[2/5] transcribe   22%  12:30 / 58:10  31.0s\x1b[K"
+    assert cli._tty_line(event, 5, 31.04, width=12) == "\r[2/5] trans\x1b[K"
+
+
+def test_tty_output_is_throttled_and_cleared_before_the_final_line(capsys):
+    now = [0.0]
+    out = cli._StageOutput(tty=True, clock=lambda: now[0], width=lambda: 80)
+    out(_running(StageName.LLM, None))
+    for i in range(1, 11):  # 10 reports in 0.6 s → redrawn every 0.1 s at most
+        now[0] = i * 0.06
+        out(_running(StageName.LLM, i / 10, f"window {i}/10"))
+    out(StageEvent(StageName.LLM, StageStatus.DONE, elapsed=0.5))
+    written = capsys.readouterr().out
+    assert written.count("\r[3/5] llm") == 5
+    assert written.endswith("\r\x1b[K[3/5] llm         done      0.5s\n")

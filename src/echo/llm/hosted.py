@@ -79,7 +79,7 @@ PROVIDERS: dict[str, HostedProvider] = {
     "gemini": HostedProvider(
         "https://generativelanguage.googleapis.com/v1beta/openai",
         "GEMINI_API_KEY",
-        "gemini-2.5-flash",
+        "gemini-flash-lite-latest",
         "https://aistudio.google.com/apikey",
     ),
     "mistral": HostedProvider(

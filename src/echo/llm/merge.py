@@ -3,12 +3,13 @@ chunking → extraction → merging over a whole transcript."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
+from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
+from echo import progress
 from echo.config import LLMConfig, PipelineConfig
 from echo.interfaces import Chunker, TopicExtractor, TopicMerger
 from echo.job import Job
@@ -28,21 +29,37 @@ def concurrency(config: LLMConfig) -> int:
 
 
 def extract_all(
-    extractor: TopicExtractor, windows: list[TranscriptWindow], workers: int
+    extractor: TopicExtractor,
+    windows: list[TranscriptWindow],
+    workers: int,
+    *,
+    on_done: Callable[[int], None] | None = None,
 ) -> list[list[Topic]]:
     """``extractor.extract`` for every window, up to ``workers`` at a time (#56).
 
-    Results are in window order, so merging is deterministic. As soon as any window
-    fails, the windows not started yet are cancelled (a dead provider doesn't get every
-    request); calls already in flight finish, since a thread can't be interrupted. The
-    error raised is the one from the lowest failed window, so the message is stable.
+    Results are in window order, so merging is deterministic. ``on_done(n)`` is called
+    from this thread each time another window finishes (``n`` = windows done so far), so
+    ``echo.progress`` reports reach the pipeline (#61). As soon as any window fails, the
+    windows not started yet are cancelled (a dead provider doesn't get every request);
+    calls already in flight finish, since a thread can't be interrupted. The error raised
+    is the one from the lowest failed window, so the message is stable.
     """
+    report = on_done or (lambda done: None)
     if workers <= 1 or len(windows) <= 1:
-        return [extractor.extract(window) for window in windows]
+        results = []
+        for window in windows:
+            results.append(extractor.extract(window))
+            report(len(results))
+        return results
     pool = ThreadPoolExecutor(max_workers=min(workers, len(windows)), thread_name_prefix="llm")
     try:
         futures = [pool.submit(extractor.extract, window) for window in windows]
-        wait(futures, return_when=FIRST_EXCEPTION)
+        done = 0
+        for future in as_completed(futures):
+            if future.exception() is not None:
+                break  # cancel the rest below
+            done += 1
+            report(done)
     finally:
         pool.shutdown(wait=True, cancel_futures=True)
     for future in futures:
@@ -161,7 +178,13 @@ class LLMStage:
     def run(self, job: Job, config: PipelineConfig) -> None:
         transcript = job.read_transcript()
         windows = self.chunker(transcript, config.chunk)
-        per_window = extract_all(self.extractor, windows, concurrency(config.llm))
+
+        def window_done(done: int) -> None:
+            progress.report(done / len(windows), f"window {done}/{len(windows)}")
+
+        per_window = extract_all(
+            self.extractor, windows, concurrency(config.llm), on_done=window_done
+        )
         job.write_topics(self.merger(per_window))
         if self.models:
             meta = job.read_meta()

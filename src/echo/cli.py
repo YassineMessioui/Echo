@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import sys
+import time
 import traceback
+from collections.abc import Callable
 from enum import StrEnum
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -172,6 +176,82 @@ def _progress_line(event: StageEvent, total: int) -> str:
     return f"[{index}/{total}] {event.stage.value:<11} {event.status.value:<9} {elapsed}".rstrip()
 
 
+CLEAR_LINE = "\x1b[K"
+REDRAW_INTERVAL = 0.1
+"""Seconds between redraws of the running line on a terminal (at most ~10 per second)."""
+
+
+def _running_line(event: StageEvent, total: int, elapsed: float) -> str:
+    """``[2/5] transcribe   42%  12:30 / 58:10  31.0s`` for a RUNNING event with progress."""
+    index = _STAGES.index(event.stage) + 1
+    percent = f"{(event.progress or 0.0) * 100:.0f}%"
+    detail = f"{event.detail}  " if event.detail else ""
+    return f"[{index}/{total}] {event.stage.value:<11} {percent:>4}  {detail}{elapsed:.1f}s"
+
+
+def _tty_line(event: StageEvent, total: int, elapsed: float, width: int) -> str:
+    """The running line redrawn in place: a carriage return, the line cut to the terminal width (a
+    wrapped line can't be redrawn), then clear to the end of the line."""
+    return "\r" + _running_line(event, total, elapsed)[: max(width - 1, 1)] + CLEAR_LINE
+
+
+class _StageOutput:
+    """Turns ``StageEvent``s into the CLI's stage lines (#61).
+
+    DONE / SKIPPED / FAILED print one final line per stage, as always. RUNNING events
+    with ``progress`` show where a long stage is: on a terminal, one line redrawn in
+    place (throttled); otherwise (piped, or ``--verbose``, whose log lines would break
+    an in-place line) a plain line each time the stage passes another 10%.
+    """
+
+    def __init__(
+        self,
+        *,
+        tty: bool,
+        total: int = len(_STAGES),
+        clock: Callable[[], float] = time.monotonic,
+        width: Callable[[], int] = lambda: shutil.get_terminal_size().columns,
+    ) -> None:
+        self._tty = tty
+        self._total = total
+        self._clock = clock
+        self._width = width
+        self._started: dict[StageName, float] = {}
+        self._steps: dict[StageName, int] = {}
+        self._last_draw = -REDRAW_INTERVAL
+        self._drawn = False
+
+    def __call__(self, event: StageEvent) -> None:
+        now = self._clock()
+        if event.status is StageStatus.RUNNING:
+            started = self._started.setdefault(event.stage, now)
+            if event.progress is not None:
+                self._show(event, now - started, now)
+            return
+        if self._drawn:
+            typer.echo("\r" + CLEAR_LINE, nl=False, color=True)
+            self._drawn = False
+        typer.echo(_progress_line(event, self._total))
+
+    def _show(self, event: StageEvent, elapsed: float, now: float) -> None:
+        if self._tty:
+            if now - self._last_draw < REDRAW_INTERVAL:
+                return
+            self._last_draw = now
+            # color=True: keep the clear-line code (only ever written to a terminal).
+            typer.echo(_tty_line(event, self._total, elapsed, self._width()), nl=False, color=True)
+            self._drawn = True
+            return
+        step = int((event.progress or 0.0) * 10)
+        if step > self._steps.get(event.stage, 0):
+            self._steps[event.stage] = step
+            typer.echo(_running_line(event, self._total, elapsed))
+
+
+def _is_terminal() -> bool:
+    return sys.stdout.isatty() and os.environ.get("TERM") != "dumb"
+
+
 class _DownloadProgress:
     """Prints ``[download]  40%`` lines in 20% steps (per stream: video, then audio)."""
 
@@ -278,9 +358,7 @@ def run(
     )
     _check_captions_supported(config)
 
-    def on_event(event: StageEvent) -> None:
-        if event.status is not StageStatus.RUNNING:
-            typer.echo(_progress_line(event, len(_STAGES)))
+    on_event = _StageOutput(tty=_is_terminal() and not verbose)
 
     try:
         if is_url(video):

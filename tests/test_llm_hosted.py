@@ -65,6 +65,11 @@ def test_every_preset_builds(name: str):
     assert client.model_name == f"{name}/{preset.default_model}"
 
 
+def test_gemini_default_is_available_to_new_users():
+    # gemini-2.5-flash returns 404 for new API keys (#85).
+    assert PROVIDERS["gemini"].default_model == "gemini-flash-lite-latest"
+
+
 def test_generic_key_overrides_provider_key():
     client, seen = _client(lambda r: _ok(""), env={"GROQ_API_KEY": "a", API_KEY_ENV: "b"})
     client.complete("s", "p")
