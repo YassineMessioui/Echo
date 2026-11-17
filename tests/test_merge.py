@@ -1,6 +1,10 @@
+import _thread
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import pytest
@@ -18,6 +22,7 @@ from echo.llm.merge import (
     span_containment,
     span_iou,
 )
+from echo.llm.topics import LLMTopicExtractor
 from echo.models import StageName, Topic, Transcript, TranscriptWindow
 
 
@@ -336,3 +341,97 @@ def test_on_done_counts_only_successes_before_a_failure():
     with pytest.raises(LLMError, match="window 20"):
         extract_all(extractor, windows, workers=2, on_done=done.append)
     assert done == list(range(1, len(done) + 1)) and len(done) < 6
+
+
+# --- Ctrl+C (#83) ----------------------------------------------------------------------
+
+
+class _BlockingClient:
+    """``LLMClient`` whose calls block for ``seconds`` or until ``close()``."""
+
+    model_name = "fake/blocking"
+
+    def __init__(self, seconds: float = 3.0) -> None:
+        self.seconds = seconds
+        self.closed = threading.Event()
+        self.calls = 0
+
+    def complete(self, system: str, prompt: str, *, json_schema=None) -> str:
+        self.calls += 1
+        if self.closed.wait(self.seconds):
+            raise LLMError("client closed")  # must not replace the KeyboardInterrupt
+        return '{"topics": []}'
+
+    def close(self) -> None:
+        self.closed.set()
+
+
+@contextmanager
+def _ctrl_c_after(seconds: float):
+    """Interrupt the main thread like Ctrl+C (works on Windows too); yields a clock."""
+    timer = threading.Timer(seconds, _thread.interrupt_main)
+    t0 = time.perf_counter()
+    timer.start()
+    try:
+        yield lambda: time.perf_counter() - t0
+    finally:
+        timer.cancel()
+
+
+@pytest.mark.parametrize("workers", [1, 4])
+def test_ctrl_c_stops_extraction_without_waiting_for_calls_in_flight(workers: int):
+    client = _BlockingClient(seconds=3.0)
+    extractor = LLMTopicExtractor(client, LLMConfig(max_retries=0))
+    windows = [TranscriptWindow(start_segment=s, end_segment=e, text="") for s, e in _windows(8)]
+    with _ctrl_c_after(0.3) as elapsed, pytest.raises(KeyboardInterrupt):
+        extract_all(extractor, windows, workers=workers)
+    assert elapsed() < 1.0, f"Ctrl+C took {elapsed():.2f} s"
+    assert client.closed.is_set(), "the client is closed so calls in flight fail fast"
+    time.sleep(0.1)  # the workers see the closed client and stop
+    assert client.calls == workers, "no window starts after Ctrl+C"
+
+
+def test_ctrl_c_writes_no_topics_and_is_recorded_as_interrupted(job_copy: Job):
+    from echo.models import StageStatus
+    from echo.pipeline import run_pipeline
+
+    job_copy.topics_path.unlink()
+    extractor = LLMTopicExtractor(_BlockingClient(), LLMConfig())
+    stage = LLMStage(chunker=_fixed_chunker(_windows(6)), extractor=extractor)
+    with _ctrl_c_after(0.3) as elapsed, pytest.raises(KeyboardInterrupt):
+        run_pipeline(job_copy, [stage], PipelineConfig(llm=LLMConfig(max_concurrency=3)))
+    assert elapsed() < 1.0
+    assert not job_copy.topics_path.exists()
+    record = job_copy.read_meta().stages[StageName.LLM]
+    assert record.status == StageStatus.FAILED
+    assert record.error == "interrupted"
+
+
+_EXIT_SCRIPT = """
+import _thread, threading, time
+from echo.llm.merge import extract_all
+from echo.models import TranscriptWindow
+
+class Stuck:  # ignores close(): the worst case for interpreter exit
+    def extract(self, window):
+        time.sleep(5)
+        return []
+
+windows = [TranscriptWindow(start_segment=i, end_segment=i, text="") for i in range(8)]
+threading.Timer(0.3, _thread.interrupt_main).start()
+try:
+    extract_all(Stuck(), windows, workers=4)
+except KeyboardInterrupt:
+    print("interrupted")
+"""
+
+
+def test_process_exits_promptly_after_ctrl_c():
+    """Worker threads stuck in a call must not keep the interpreter alive at exit."""
+    t0 = time.perf_counter()
+    result = subprocess.run(
+        [sys.executable, "-c", _EXIT_SCRIPT], capture_output=True, text=True, timeout=30
+    )
+    elapsed = time.perf_counter() - t0
+    assert result.stdout.strip() == "interrupted", result.stderr
+    assert elapsed < 4.0, f"exit took {elapsed:.2f} s; a joined worker would take ≥ 5 s"

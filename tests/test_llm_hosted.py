@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 
 import httpx
 import pytest
@@ -296,3 +298,38 @@ def test_429_on_json_mode_is_retried_before_the_json_fallback():
     client, seen = _client(_limited(1, "0"))
     assert client.complete("s", "p", json_schema=SCHEMA) == "{}"
     assert [("response_format" in json.loads(r.content)) for r in seen] == [True, True]
+
+
+# --- Ctrl+C (#83) -------------------------------------------------------------------------
+
+
+def test_close_ends_a_retry_wait_at_once():
+    """A 503 with a long ``retry-after`` is waited out on an event that ``close()`` sets."""
+    client = OpenAICompatibleClient(
+        provider="groq",
+        base_url="https://api.test/v1",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(503, headers={"retry-after": "50"}, json={})
+        ),
+    )
+    errors: list[BaseException] = []
+
+    def call() -> None:
+        try:
+            client.complete("s", "p")
+        except BaseException as e:
+            errors.append(e)
+
+    thread = threading.Thread(target=call, daemon=True)
+    thread.start()
+    time.sleep(0.2)  # now in the 50 s retry wait
+    t0 = time.perf_counter()
+    client.close()
+    thread.join(5)
+    assert not thread.is_alive() and time.perf_counter() - t0 < 0.5
+    assert len(errors) == 1 and isinstance(errors[0], LLMError)
+    assert "cancelled" in str(errors[0])
+    with pytest.raises(LLMError, match="cancelled"):
+        client.complete("s", "p")

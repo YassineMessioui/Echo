@@ -160,6 +160,13 @@ class _LazyTopicExtractor:
     def extract(self, window: TranscriptWindow) -> list[Topic]:
         return self._get().extract(window)
 
+    def close(self) -> None:
+        """Close the client if it was built (Ctrl+C, #83); the next use builds a new one."""
+        with self._lock:
+            real, self._real = self._real, None
+        if real is not None:
+            real.close()
+
 
 class _LLMModels(Mapping[str, str]):
     """``LLMStage.models``, resolved when the stage records them (after extraction), so

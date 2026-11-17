@@ -70,6 +70,9 @@ class LLMTopicExtractor:
     An invalid answer is retried up to ``config.max_retries`` times, each time with the
     error and the previous answer appended to the prompt. ``LLMError`` from the client
     (provider down, model missing) is not retried.
+
+    ``close()`` closes the client, if it has a ``close`` method, and may be called from
+    another thread: ``extract_all`` does so on Ctrl+C, so calls in flight fail fast (#83).
     """
 
     prompt_version = prompts.PROMPT_VERSION
@@ -105,3 +108,8 @@ class LLMTopicExtractor:
             f"LLM output for segments {window.start_segment}–{window.end_segment} was still "
             f"invalid after {attempts} attempts: {error}"
         )
+
+    def close(self) -> None:
+        close = getattr(self.client, "close", None)
+        if callable(close):
+            close()
