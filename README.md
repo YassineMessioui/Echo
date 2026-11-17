@@ -169,12 +169,15 @@ The CLI is called `echo-clips` because `echo` clashes with the shell builtin:
 
 ```bash
 uv run echo-clips run episode.mp4                         # → jobs/<job_id>/clips/*.mp4
+uv run echo-clips run "https://youtu.be/VIDEO_ID"         # a link: downloaded with yt-dlp first
 uv run echo-clips run episode.mp4 --job-id ep42           # name the job; re-run to resume it
 uv run echo-clips run episode.mp4 --job-id ep42 --from-stage refine --max-duration 45
 uv run echo-clips run episode.mp4 --job-id ep42 --force   # redo every stage
 GROQ_API_KEY=... uv run echo-clips run episode.mp4 --llm-provider groq --llm-model openai/gpt-oss-120b
 uv run echo-clips run episode.mp4 --aspect source         # keep the original framing
 ```
+
+Links (YouTube, Vimeo, …) are downloaded with yt-dlp; YouTube also needs a JavaScript runtime (`deno`, `node` or `bun`) on `PATH`. Only clip videos you have the rights to use (see Open questions). Details in [docs/cli.md](docs/cli.md).
 
 - Clips are **9:16 at 1080×1920** by default. `--aspect source` keeps the source framing; `--crop-x` moves the crop window (0 = left, 1 = right).
 - Re-running a job skips the stages that are done. `--force` redoes every stage; `--from-stage <name>` redoes that stage and everything after it (e.g. new duration limits only need `refine` and `clip`).

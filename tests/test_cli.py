@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 
 from echo import cli
 from echo.config import PipelineConfig
-from echo.errors import LLMError
+from echo.errors import InvalidInputError, LLMError
 from echo.job import Job
 from echo.models import StageName, StageStatus
 from echo.pipeline import PipelineError, StageEvent
@@ -332,6 +332,36 @@ def test_dotenv_is_loaded_without_overriding_the_shell(fake, video, jobs_dir, mo
     finally:
         os.environ.pop("MISTRAL_API_KEY", None)  # load_dotenv sets it outside monkeypatch
     assert seen == {"mistral": "from-dotenv", "groq": "from-shell"}
+
+
+def test_url_is_downloaded_into_a_job(fake, jobs_dir, monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_job_from_url(jobs_dir_, url, job_id=None, *, on_progress=None):
+        seen.update(jobs_dir=jobs_dir_, url=url, job_id=job_id)
+        on_progress(0.5)
+        on_progress(1.0)
+        video = tmp_path / "downloaded.mp4"
+        video.write_bytes(b"x")
+        return Job.create(jobs_dir_, video, job_id="youtube-abc")
+
+    monkeypatch.setattr(cli, "job_from_url", fake_job_from_url)
+    result = invoke("run", "https://youtu.be/abc", "--jobs-dir", jobs_dir)
+    assert result.exit_code == 0, result.output
+    assert seen == {"jobs_dir": jobs_dir, "url": "https://youtu.be/abc", "job_id": None}
+    assert "[download]  40%" in result.output and "[download] 100%" in result.output
+    assert fake.calls[0]["job"].job_id == "youtube-abc"
+
+
+def test_url_download_error_exits_1(fake, jobs_dir, monkeypatch):
+    def failing(*args, **kwargs):
+        raise InvalidInputError("could not download https://youtu.be/x: Private video")
+
+    monkeypatch.setattr(cli, "job_from_url", failing)
+    result = invoke("run", "https://youtu.be/x", "--jobs-dir", jobs_dir)
+    assert result.exit_code == 1
+    assert "Private video" in result.output
+    assert fake.calls == []
 
 
 def _clear_quiet_env(monkeypatch):
