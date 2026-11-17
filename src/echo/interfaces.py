@@ -148,7 +148,13 @@ class Clipper(Protocol):
 
 
 class Stage(Protocol):
-    """Adapter between a layer and the job directory, run by the orchestrator."""
+    """Adapter between a layer and the job directory, run by the orchestrator.
+
+    Optional: ``settings(config) -> str | None``, a fingerprint of the config its outputs
+    depend on (e.g. the whisper model and batch size). When it changes, the orchestrator
+    re-runs the stage even though its outputs exist. Report progress inside ``run`` with
+    ``echo.progress.report(fraction, detail)``.
+    """
 
     name: StageName
 

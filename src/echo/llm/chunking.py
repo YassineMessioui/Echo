@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 
-from echo.config import ChunkConfig
+from echo.config import AUTO_MAX_TOKENS, ChunkConfig
 from echo.models import Segment, Transcript, TranscriptWindow
 
 TokenCounter = Callable[[str], int]
@@ -48,6 +48,7 @@ class WindowChunker:
         self.count_tokens = count_tokens
 
     def __call__(self, transcript: Transcript, config: ChunkConfig) -> list[TranscriptWindow]:
+        budget = AUTO_MAX_TOKENS if config.max_tokens == "auto" else config.max_tokens
         lines = [format_segment(seg) for seg in transcript.segments]
         # Count each line with its trailing newline: for a sub-additive counter
         # (like chars/4 rounded up) the sum never underestimates the joined text.
@@ -57,7 +58,7 @@ class WindowChunker:
         start = 0
         while start < len(lines):
             end, used = start, costs[start]
-            while end + 1 < len(lines) and used + costs[end + 1] <= config.max_tokens:
+            while end + 1 < len(lines) and used + costs[end + 1] <= budget:
                 end += 1
                 used += costs[end]
             windows.append(
