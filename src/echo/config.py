@@ -29,13 +29,15 @@ class TranscribeConfig(_Section):
         "pipeline, best on a GPU); 0 = the sequential decoder, more accurate on a CPU (#58).",
     )
     vad_filter: bool = Field(
-        default=True, description="Skip silence and music with Silero VAD before decoding."
+        default=True,
+        description="Skip silence and music with Silero VAD before decoding (new default "
+        "in #58; set false for the earlier transcripts).",
     )
     vad_min_silence_ms: int | None = Field(
         default=None,
         ge=0,
-        description="Silence (ms) that ends a speech chunk. None = faster-whisper's "
-        "default for the mode (160 ms batched, 2000 ms sequential).",
+        description="Silence (ms) that ends a speech chunk; only used with vad_filter. "
+        "None = faster-whisper's default for the mode (160 ms batched, 2000 ms sequential).",
     )
 
 
