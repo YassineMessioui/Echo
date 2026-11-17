@@ -261,7 +261,43 @@ class TranscribeStage:
     def run(self, job: Job, config: PipelineConfig) -> None:
         if not job.audio_path.is_file():
             raise ArtifactError(f"missing artifact: {job.audio_path}")
-        job.write_transcript(self.transcriber.transcribe(job.audio_path))
+        transcript = self.transcriber.transcribe(job.audio_path)
         meta = job.read_meta()
+        job.write_transcript(in_original_time(transcript, _ingest_offset(meta.models)))
         meta.models["whisper"] = self.transcriber.model_name
         job.write_meta(meta)
+
+
+INGEST_RANGE_KEY = "ingest_range"
+"""``JobMeta.models`` key where the ingest stage records a focus range (#59), as
+``"<start>:<end>"`` seconds of the original video (``echo.ingest.RANGE_KEY``)."""
+
+
+def _ingest_offset(models: dict[str, str]) -> float:
+    """Where ``audio.wav`` starts in the original video: the recorded range's start, or 0."""
+    recorded = models.get(INGEST_RANGE_KEY)
+    if not recorded:
+        return 0.0
+    try:
+        return max(float(recorded.partition(":")[0]), 0.0)
+    except ValueError as e:
+        raise ArtifactError(f"job.json: bad {INGEST_RANGE_KEY} {recorded!r}") from e
+
+
+def in_original_time(transcript: Transcript, offset: float) -> Transcript:
+    """``transcript`` (times relative to ``audio.wav``) shifted by ``offset`` seconds into
+    original-video time, with ``offset`` set and ``duration`` the span's end."""
+    if offset <= 0:
+        return transcript
+
+    def shift(t: float) -> float:
+        return round(t + offset, 3)
+
+    data = transcript.model_dump()
+    for segment in data["segments"]:
+        segment["start"], segment["end"] = shift(segment["start"]), shift(segment["end"])
+        for word in segment["words"]:
+            word["start"], word["end"] = shift(word["start"]), shift(word["end"])
+    data["duration"] = shift(transcript.duration)
+    data["offset"] = round(offset, 3)
+    return Transcript.model_validate(data)

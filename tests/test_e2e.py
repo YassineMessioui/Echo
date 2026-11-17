@@ -18,14 +18,16 @@ import json
 import os
 import re
 import shutil
+import wave
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
-from echo.config import LLMConfig, PipelineConfig, TranscribeConfig
-from echo.ffmpeg import probe
+from echo.config import CaptionConfig, IngestConfig, LLMConfig, PipelineConfig, TranscribeConfig
+from echo.ffmpeg import ffmpeg, probe
 from echo.job import Job
 from echo.llm.prompts import PROMPT_VERSION
 from echo.llm.topics import LLMTopicExtractor
@@ -184,6 +186,65 @@ def test_pipeline_end_to_end(tmp_path: Path):
     calls = len(client.calls)
     _check_resume(job, stages, config)
     assert len(client.calls) == calls, "a skipped LLM stage must not call the client"
+
+
+def test_focus_range_clips_stay_inside_it_in_original_time(tmp_path: Path):
+    """#59 acceptance: with ``--range 30%:70%`` only that span is transcribed, and the
+    clips lie inside it, timed (and cut) in original-video time."""
+    # Captions off: they don't depend on the range, and this runs without libass.
+    config = _config(tmp_path).model_copy(
+        update={
+            "ingest": IngestConfig(start="30%", end="70%"),
+            "caption": CaptionConfig(enabled=False),
+        }
+    )
+    job = _job(tmp_path, config)
+    stages = _with_llm_client(build_stages(config), SectionLLM(SECTIONS), config)
+
+    run_pipeline(job, stages, config)
+
+    duration = probe(job.input_video).duration
+    lo, hi = round(0.3 * duration, 3), round(0.7 * duration, 3)  # recorded to the ms
+    assert job.read_meta().models["ingest_range"] == f"{lo:.3f}:{hi:.3f}"
+    assert probe(job.audio_path).duration == pytest.approx(hi - lo, abs=0.1)
+
+    transcript = job.read_transcript()
+    assert transcript.offset == pytest.approx(lo, abs=0.001)
+    assert transcript.duration == pytest.approx(hi, abs=0.1)
+    assert all(lo <= s.start and s.end <= hi + 0.1 for s in transcript.segments)
+    # Timestamps are in original time: the bicycle section starts at 35.4 s in the video.
+    bikes = next(s for s in transcript.segments if "bicycle" in s.text.lower())
+    assert bikes.start == pytest.approx(SECTIONS[1]["start"], abs=1.5)
+
+    clips = job.read_clips()
+    # Only the bicycle section lies (almost) wholly inside 30–70 %; the coffee section's
+    # tail and the ocean section's head are too short to clip.
+    assert [c.topic_title for c in clips] == [SECTIONS[1]["title"]]
+    for i, clip in enumerate(clips, start=1):
+        assert lo <= clip.start < clip.end <= hi
+        assert clip.start == pytest.approx(SECTIONS[1]["start"], abs=1.5)
+        assert clip.end == pytest.approx(SECTIONS[1]["end"], abs=1.5)
+        path = job.clip_video_path(i, clip.topic_title)
+        assert probe(path).duration == pytest.approx(clip.duration, abs=0.1)
+        # Cut from the original at clip.start: its loudness envelope matches the
+        # original's there, and not a few seconds earlier.
+        clip_env = _envelope(path, 0.0, 10.0, tmp_path / "a.wav")
+        same = _envelope(job.input_video, clip.start, 10.0, tmp_path / "b.wav")
+        shifted = _envelope(job.input_video, clip.start - 3.0, 10.0, tmp_path / "c.wav")
+        assert np.corrcoef(clip_env, same)[0, 1] > 0.9
+        assert np.corrcoef(clip_env, shifted)[0, 1] < 0.6
+
+
+def _envelope(media: Path, start: float, seconds: float, wav: Path) -> np.ndarray:
+    """RMS loudness of ``media`` in 50 ms frames, from ``start`` for ``seconds``."""
+    ffmpeg(
+        ["-ss", f"{start:.3f}", "-t", f"{seconds:.3f}", "-i", str(media)]
+        + ["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)]
+    )
+    with wave.open(str(wav), "rb") as w:
+        samples = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float64)
+    frames = samples[: len(samples) // 800 * 800].reshape(-1, 800)
+    return np.sqrt((frames**2).mean(axis=1))
 
 
 LIVE_PROVIDER = os.environ.get("ECHO_LIVE_LLM")
