@@ -88,6 +88,10 @@ class ClipConfig(_Section):
     """Fill for sources narrower than 9:16, which are padded instead of cropped."""
     crop_x: float = Field(default=0.5, ge=0.0, le=1.0)
     """Horizontal crop position for 9:16 (0 = left edge, 0.5 = centre, 1 = right edge)."""
+    max_workers: int | None = Field(default=None, ge=1, le=16)
+    """Clips encoded at once (#57); each ffmpeg gets a share of the cores. None =
+    ``min(4, cpu_count // 2)`` (see ``echo.clip.clip_workers``). It doesn't change the
+    output, so it isn't part of the clip manifest's fingerprint."""
 
 
 HexColour = Annotated[str, Field(pattern=r"^#[0-9A-Fa-f]{6}$")]

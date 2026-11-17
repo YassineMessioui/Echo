@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from echo.config import LLMConfig, PipelineConfig, RefineConfig, TranscribeConfig
+from echo.config import ClipConfig, LLMConfig, PipelineConfig, RefineConfig, TranscribeConfig
 from echo.errors import ArtifactError, InvalidInputError, LLMError
 from echo.interfaces import LLMClient
 from echo.job import Job, slugify
@@ -283,3 +283,11 @@ def test_llm_max_concurrency_defaults_to_auto():
     for bad in (0, 17):  # 17+: a burst that free tiers answer with 429s
         with pytest.raises(ValidationError):
             LLMConfig(max_concurrency=bad)
+
+
+def test_clip_max_workers_defaults_to_auto():
+    assert ClipConfig().max_workers is None  # min(4, cpu_count // 2), resolved by the stage
+    assert ClipConfig(max_workers=2).max_workers == 2
+    for bad in (0, 17):
+        with pytest.raises(ValidationError):
+            ClipConfig(max_workers=bad)
