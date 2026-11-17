@@ -48,15 +48,17 @@ CHUNK_SECONDS = 30
 
 
 def fixed_chunks(n_samples: int, rate: int = 16_000) -> list[dict[str, float]]:
-    """Back-to-back ``CHUNK_SECONDS`` windows covering the audio, in seconds.
+    """Equal back-to-back windows of at most ``CHUNK_SECONDS`` covering the audio.
 
     The batched pipeline needs chunk boundaries: from VAD, or these when VAD is off.
-    Empty audio gives none (faster-whisper then decodes it as one short chunk).
+    Equal lengths avoid a tiny last chunk (60.05 s → 30 + 30 + 0.05 s), which Whisper
+    pads to 30 s and tends to fill with hallucinated text. Empty audio gives none.
     """
     duration = n_samples / rate
+    n = math.ceil(duration / CHUNK_SECONDS)
     return [
-        {"start": float(i * CHUNK_SECONDS), "end": min(float((i + 1) * CHUNK_SECONDS), duration)}
-        for i in range(math.ceil(duration / CHUNK_SECONDS))
+        {"start": duration * i / n, "end": duration if i == n - 1 else duration * (i + 1) / n}
+        for i in range(n)
     ]
 
 

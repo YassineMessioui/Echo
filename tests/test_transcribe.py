@@ -279,9 +279,9 @@ def test_batched_without_vad_passes_fixed_30s_chunks(tmp_path: Path):
     ((_, kwargs),) = model.calls
     assert kwargs["vad_filter"] is False
     assert kwargs["clip_timestamps"] == [
-        {"start": 0.0, "end": 30.0},
-        {"start": 30.0, "end": 60.0},
-        {"start": 60.0, "end": 65.0},
+        {"start": 0.0, "end": pytest.approx(65 / 3)},
+        {"start": pytest.approx(65 / 3), "end": pytest.approx(130 / 3)},
+        {"start": pytest.approx(130 / 3), "end": 65.0},
     ]
 
 
@@ -301,6 +301,36 @@ def test_fixed_chunks_short_and_exact_lengths():
     assert fixed_chunks(16_000 * 10) == [{"start": 0.0, "end": 10.0}]
     assert fixed_chunks(16_000 * 60) == [{"start": 0.0, "end": 30.0}, {"start": 30.0, "end": 60.0}]
     assert fixed_chunks(0) == []
+    tail = fixed_chunks(int(16_000 * 60.05))  # no 50 ms last chunk
+    assert len(tail) == 3 and min(c["end"] - c["start"] for c in tail) > 20
+    assert tail[-1]["end"] == pytest.approx(60.05)
+    assert all(a["end"] == b["start"] for a, b in zip(tail, tail[1:], strict=False))
+
+
+def test_batched_cpu_fallback_rewraps_the_cpu_model(audio: Path):
+    good = FakeWhisperModel([_segment(0.0, 1.0, "ok")])
+
+    class NoCuda:
+        def transcribe(self, audio, **kwargs):
+            raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+
+    wrapped: list[object] = []
+
+    def pipeline(model):
+        wrapped.append(model)
+        return FakeBatchedPipeline(model) if model is good else model
+
+    def factory(cfg: TranscribeConfig):
+        return NoCuda() if cfg.device == "auto" else good
+
+    transcriber = WhisperTranscriber(
+        TranscribeConfig(device="auto", batch_size=8),
+        model_factory=factory,
+        pipeline_factory=pipeline,
+    )
+    assert [s.text for s in transcriber.transcribe(audio).segments] == ["ok"]
+    assert len(wrapped) == 2 and wrapped[1] is good, "the CPU model is wrapped again"
+    assert good.calls[0][1]["batched"], "and still runs batched"
 
 
 # --- real model (opt-in: uv run pytest -m model) -------------------------------------------
