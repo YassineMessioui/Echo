@@ -14,6 +14,7 @@ Only clip content you have the rights to use.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -31,6 +32,9 @@ from echo.errors import ArtifactError, InvalidInputError
 from echo.interfaces import RemoteVideo
 from echo.job import Job
 from echo.models import JobMeta
+from echo.progress import report
+
+logger = logging.getLogger(__name__)
 
 FORMAT = "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/b"
 """Full download (fallback): best video up to 1080p + best audio, merged to MP4."""
@@ -42,6 +46,18 @@ VIDEO_FORMAT = "bv*[height<=1080][vcodec^=avc1]/bv*[height<=1080]/b[height<=1080
 
 SEEKABLE_PROTOCOLS = frozenset({"http", "https", "m3u8", "m3u8_native"})
 """Streams ffmpeg can seek into over the network (fragmented DASH can't be)."""
+
+CREDENTIAL_HEADER = re.compile(r"cookie|auth|token|secret", re.IGNORECASE)
+"""Header names that look like credentials: a stream needing them is never read remotely.
+
+``RemoteVideo.headers`` go on ffmpeg's command line (``-headers``), which other users
+can see in the process list. yt-dlp's ``http_headers`` for YouTube are User-Agent,
+Accept and the like: yt-dlp drops ``Cookie`` from them (cookies, e.g. from a cookie
+file, go in the format's separate ``cookies`` field, which Echo never passes) and
+YouTube's ``Authorization`` is only sent to its API, not to the stream. Other sites may
+still put auth in there, so such a stream falls back to the full download, where the
+headers stay inside yt-dlp. Dropping them instead isn't safe: the remote read would just
+fail (403) instead of falling back."""
 
 JS_RUNTIMES = ("deno", "node", "bun")
 """YouTube needs a JavaScript runtime; yt-dlp only enables deno by default."""
@@ -157,31 +173,50 @@ def resolve_video(
     url: str, audio: Path, *, ydl_factory: YDLFactory = _default_factory
 ) -> RemoteVideo | None:
     """A fresh ``RemoteVideo`` for ``url`` (stream URLs expire, so call this right before
-    cutting), or None if ffmpeg can't seek into the stream."""
+    cutting), or None if the stream can't be read remotely (see ``video_source``)."""
+    remote = _resolve(url, audio, ydl_factory)
+    return remote if isinstance(remote, RemoteVideo) else None
+
+
+def _resolve(url: str, audio: Path, ydl_factory: YDLFactory) -> RemoteVideo | str:
+    """The ``RemoteVideo``, or why the stream can't be read remotely."""
     f = _video_format(_extract(url, ydl_factory))
-    if f.get("protocol") not in SEEKABLE_PROTOCOLS or not f.get("width") or not f.get("height"):
-        return None
+    headers = {str(k): str(v) for k, v in (f.get("http_headers") or {}).items()}
+    if (protocol := f.get("protocol")) not in SEEKABLE_PROTOCOLS:
+        return f"ffmpeg can't seek into its {protocol or 'unknown'} protocol"
+    if not f.get("width") or not f.get("height"):
+        return "its frame size is unknown"
+    if secret := sorted(k for k in headers if CREDENTIAL_HEADER.search(k)):
+        return f"it needs credential headers ({', '.join(secret)}) kept off ffmpeg's argv"
     return RemoteVideo(
-        url=f["url"],
-        audio=audio,
-        width=int(f["width"]),
-        height=int(f["height"]),
-        headers={str(k): str(v) for k, v in (f.get("http_headers") or {}).items()},
+        url=f["url"], audio=audio, width=int(f["width"]), height=int(f["height"]), headers=headers
     )
 
 
 def video_source(job: Job, *, ydl_factory: YDLFactory = _default_factory) -> Path | RemoteVideo:
     """What the clip stage cuts from: the local ``input.mp4``, or, for a link job, the
-    remote video (downloading it in full only if the stream can't be read remotely)."""
+    remote video (downloading it in full only if the stream can't be read remotely, with
+    progress reported as ``"downloading full video"``)."""
     if job.input_video.is_file():
         return job.input_video
     url = job.read_meta().source_url if job.meta_path.is_file() else None
     if url is None or not job.input_audio.is_file():
         raise ArtifactError(f"missing artifact: {job.input_video}")
-    remote = resolve_video(url, job.input_audio, ydl_factory=ydl_factory)
-    if remote is not None:
+    remote = _resolve(url, job.input_audio, ydl_factory)
+    if isinstance(remote, RemoteVideo):
         return remote
-    download_video(url, job.input_video, ydl_factory=ydl_factory)
+    logger.warning(
+        "the video stream can't be read remotely (%s), so the full video is being "
+        "downloaded to %s; this can take a few minutes",
+        remote,
+        job.input_video,
+    )
+    download_video(
+        url,
+        job.input_video,
+        on_progress=lambda fraction: report(fraction, "downloading full video"),
+        ydl_factory=ydl_factory,
+    )
     return job.input_video
 
 
