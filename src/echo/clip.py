@@ -34,7 +34,7 @@ from echo.captions import CaptionStyle, build_ass, chain_filters, subtitles_filt
 from echo.config import ClipConfig, PipelineConfig
 from echo.download import video_source
 from echo.errors import ArtifactError, ExternalToolError, InvalidInputError
-from echo.ffmpeg import ffmpeg, has_filter
+from echo.ffmpeg import ffmpeg, has_filter, http_options
 from echo.interfaces import Clipper, RemoteVideo
 from echo.job import Job, _atomic_write
 from echo.models import ClipSpec, StageName
@@ -42,7 +42,23 @@ from echo.reframe import video_filter as reframe_filter
 from echo.reframe import video_filter_for
 
 REMOTE_REQUEST_SIZE = 2**20
-"""Bytes per HTTP request when reading a ``RemoteVideo`` (see ``build_ffmpeg_args``)."""
+"""Bytes per HTTP request when reading a ``RemoteVideo``."""
+
+_REMOTE_OPTIONS = {
+    # Ranged 1 MiB requests: YouTube throttles one long-running request to ~0.2 MB/s
+    # (a 60 s 1080p piece took 25 s; with this, 2.7 s). ffmpeg >= 9 only.
+    "request_size": str(REMOTE_REQUEST_SIZE),
+    "reconnect": "1",
+    "reconnect_on_network_error": "1",
+    "reconnect_delay_max": "5",
+}
+
+
+def _remote_input_options() -> list[str]:
+    """The ``_REMOTE_OPTIONS`` this ffmpeg supports (older builds lack some; without
+    ``request_size`` remote cuts still work, just slower)."""
+    supported = http_options()
+    return [arg for k, v in _REMOTE_OPTIONS.items() if k in supported for arg in (f"-{k}", v)]
 
 
 def build_ffmpeg_args(
@@ -65,11 +81,8 @@ def build_ffmpeg_args(
     start = f"{clip.start:.3f}"
     if isinstance(video, RemoteVideo):
         args = ["-headers", "".join(f"{k}: {v}\r\n" for k, v in video.headers.items())]
-        # Ranged 1 MiB requests: YouTube throttles one long-running request to ~0.2 MB/s
-        # (a 60 s 1080p piece took 25 s; with this, 2.7 s).
-        args += ["-request_size", str(REMOTE_REQUEST_SIZE)]
-        args += ["-reconnect", "1", "-reconnect_on_network_error", "1"]
-        args += ["-reconnect_delay_max", "5", "-accurate_seek", "-ss", start, "-i", video.url]
+        args += _remote_input_options()
+        args += ["-accurate_seek", "-ss", start, "-i", video.url]
         args += ["-accurate_seek", "-ss", start, "-i", str(video.audio)]
         audio_map = "1:a:0"
     else:

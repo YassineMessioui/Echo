@@ -82,6 +82,21 @@ def has_filter(name: str) -> bool:
     return name in _filters()
 
 
+@functools.cache
+def http_options() -> frozenset[str]:
+    """Options of this ffmpeg's HTTP protocol (``ffmpeg -h protocol=http``), read once.
+
+    They vary by version: e.g. ``request_size`` is missing from ffmpeg 8.0.
+    """
+    names = set()
+    for line in run("ffmpeg", ["-hide_banner", "-h", "protocol=http"]).stdout.splitlines():
+        # "  -request_size      <int64>      .D......... size (in bytes) of requests ..."
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].startswith("-") and parts[1].startswith("<"):
+            names.add(parts[0][1:])
+    return frozenset(names)
+
+
 @dataclass(frozen=True)
 class MediaInfo:
     duration: float

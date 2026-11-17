@@ -600,7 +600,10 @@ def test_video_filter_and_extra_filter_together(monkeypatch, tmp_path):
 # --- remote video (link jobs, #75) -----------------------------------------------------
 
 
-def test_args_for_remote_video_read_only_the_clip_and_local_audio(tmp_path):
+def test_args_for_remote_video_read_only_the_clip_and_local_audio(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        clip_module, "http_options", lambda: frozenset({"request_size", "reconnect"})
+    )
     remote = RemoteVideo(
         url="https://video.example/137",
         audio=tmp_path / "input-audio.m4a",
@@ -613,6 +616,7 @@ def test_args_for_remote_video_read_only_the_clip_and_local_audio(tmp_path):
     )
     assert args[args.index("-headers") + 1] == "User-Agent: UA\r\n"
     assert args[args.index("-request_size") + 1] == str(2**20)  # avoids YouTube throttling
+    assert "-reconnect_on_network_error" not in args, "unsupported by this ffmpeg: not passed"
     inputs = [args[i + 1] for i, a in enumerate(args) if a == "-i"]
     assert inputs == ["https://video.example/137", str(remote.audio)]
     assert args.count("-ss") == 2 and args[args.index("-ss") + 1] == "12.500"
