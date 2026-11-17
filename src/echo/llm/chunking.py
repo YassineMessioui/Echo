@@ -21,10 +21,12 @@ from echo.models import Segment, Transcript, TranscriptWindow
 
 TokenCounter = Callable[[str], int]
 
-LONG_CONTEXT_MAX_TOKENS = 24_000
-"""``"auto"`` budget for hosted models with a context of 128k tokens or more. The
-window is the transcript part only: the prompt, the JSON answer and the token-estimate
-error all fit in the remaining 100k+ tokens."""
+LONG_CONTEXT_MAX_TOKENS = 12_000
+"""``"auto"`` budget for hosted models with a context of 128k tokens or more.
+
+Not as big as the context allows: on a 68-min talk with ``gemini-flash-lite-latest``
+(#63), one 24k window missed a whole 25-min stretch and misplaced spans, while 12k
+windows (4x fewer calls than 3k) still covered the whole talk with correct spans."""
 
 LONG_CONTEXT_MODELS: tuple[str, ...] = (
     "openai/gpt-oss-",  # Groq, OpenRouter: 131k

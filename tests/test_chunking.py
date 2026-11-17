@@ -150,7 +150,7 @@ def test_auto_resolves_per_provider_and_model(llm: dict, expected: int):
 
 def test_auto_without_llm_config_is_the_small_budget():
     assert resolve_max_tokens(ChunkConfig()) == AUTO_MAX_TOKENS == 3000
-    assert LONG_CONTEXT_MAX_TOKENS == 24_000
+    assert LONG_CONTEXT_MAX_TOKENS == 12_000
 
 
 @pytest.mark.parametrize("llm", [{}, {"provider": "groq"}, {"provider": "gemini"}])
@@ -159,7 +159,7 @@ def test_explicit_max_tokens_wins(llm: dict):
 
 
 def test_chunker_uses_the_resolved_budget():
-    # 2000 segments of ~85 tokens each (~170k tokens): 64 windows at 3k, 7 at 24k.
+    # 2000 segments of ~85 tokens each (~170k tokens): 64 windows at 3k, 15 at 12k.
     transcript = _transcript([("word " * 60).strip()] * 2000)
     small = WindowChunker(llm=LLMConfig())(transcript, ChunkConfig())
     big = WindowChunker(llm=LLMConfig(provider="gemini"))(transcript, ChunkConfig())
@@ -171,7 +171,7 @@ def test_chunker_uses_the_resolved_budget():
         (w.start_segment, w.end_segment) for w in explicit
     ]
     assert len(small) == 64
-    assert len(big) == 7
+    assert len(big) == 15
     for windows, budget in [(small, SHORT), (big, LONG)]:
         _check_invariants(transcript, windows, ChunkConfig(max_tokens=budget))
         for prev, cur in zip(windows, windows[1:], strict=False):

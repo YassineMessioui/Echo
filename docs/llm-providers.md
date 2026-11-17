@@ -34,12 +34,12 @@ in estimated tokens (characters / 4). The default, `"auto"`, follows the model
 | Provider / model | `"auto"` budget |
 |---|---|
 | `ollama` (any model) | 3,000 |
-| hosted model starting with `openai/gpt-oss-`, `gpt-oss-`, `gemini-`, `google/gemini-`, `meta-llama/llama-3.3-70b`, `llama-3.3-70b`, `mistral-small`, `mistral-medium`, `mistral-large`, `gpt-4.1`, `gpt-4o` (128k+ context) | 24,000 |
+| hosted model starting with `openai/gpt-oss-`, `gpt-oss-`, `gemini-`, `google/gemini-`, `meta-llama/llama-3.3-70b`, `llama-3.3-70b`, `mistral-small`, `mistral-medium`, `mistral-large`, `gpt-4.1`, `gpt-4o` (128k+ context) | 12,000 |
 | any other hosted model, `openai-compatible` with an unknown model, unknown provider | 3,000 |
 
 This covers the default model of every hosted provider above. A hosted provider left
-on the Ollama default model uses the provider's default model. 24k leaves over 100k
-tokens of headroom for the prompt and the answer on these models. Ollama stays at
+on the Ollama default model uses the provider's default model. 12k is well under
+these models' context; it's deliberately not bigger (see the trade-off below). Ollama stays at
 3k whatever the model: Ollama's default context is only a few thousand tokens, and
 local models are usually small.
 
@@ -49,9 +49,11 @@ Trade-off: bigger windows mean fewer calls (less rate-limit pressure, often fast
 and fewer topics cut at window edges. But very long windows can make a model,
 especially a small one, miss topics or return fewer, coarser ones. Measured on a
 68-min talk with `gemini-flash-lite-latest` (#63): 3k windows gave 20 topics over
-the whole talk in 8 windows; one 24k window gave 6 to 8 topics, mostly from the
-first half, and some spans pointed at the wrong segments. If a long video gets too
-few topics, or misplaced ones, set a smaller budget (e.g. `3000` or `8000`).
+the whole talk in 8 windows (14 calls with retries); 12k gave 9 topics over the
+whole talk in 2 windows, spans correct; one 24k window gave 6 to 8 topics, missed
+30–56 min entirely, and some spans pointed at the wrong segments, which is why
+`"auto"` stops at 12k. For more, shorter-spaced topics set a smaller budget
+(e.g. `3000`); a bigger one (e.g. `24000`) only for models that handle it.
 
 ## Local: Ollama
 
