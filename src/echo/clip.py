@@ -206,8 +206,13 @@ class ClipStage:
     caption track (``clips/<nn>-<slug>.ass``, kept for inspection) burned in after the
     9:16 framing, in the same encode (#17).
 
+    With diarization on (``--speakers``), each speaker's captions get their own colour
+    (#68).
+
     ``outputs()`` gets no config (``Stage`` protocol), so it only detects changed
-    boundaries; changed encode settings are picked up whenever the stage runs.
+    boundaries; ``settings()`` covers the rest (encode, framing, captions, speakers), so
+    the orchestrator runs the stage when they change, and the manifest then re-cuts
+    exactly the clips whose output differs.
     """
 
     clipper: Clipper = cut_clips
@@ -216,6 +221,16 @@ class ClipStage:
     """Local ``input.mp4``, or a link job's remote video (resolved only if a clip is cut)."""
 
     name: ClassVar[StageName] = StageName.CLIP
+
+    def settings(self, config: PipelineConfig) -> str:
+        """Fingerprint of everything besides the clip boundaries that changes the clips."""
+        return _hash(
+            {
+                "clip": config.clip.model_dump(mode="json"),
+                "caption": config.caption.model_dump(mode="json"),
+                "speakers": config.diarize.enabled,
+            }
+        )
 
     def outputs(self, job: Job) -> list[Path]:
         if not job.clips_path.is_file():
@@ -256,12 +271,14 @@ class ClipStage:
             )
         transcript = job.read_transcript() if burn else None
         style = CaptionStyle.from_config(config.caption)
+        colour_speakers = burn and config.diarize.enabled and job.speakers_path.is_file()
+        speakers = job.read_speakers() if colour_speakers else None
 
         def clip_done(done: int) -> None:  # skipped (up-to-date) clips count as done
             progress.report(done / len(clips), f"clip {done}/{len(clips)}")
 
         for done, (clip, path) in enumerate(zip(clips, paths, strict=True), start=1):
-            ass = build_ass(transcript, clip, style) if transcript is not None else None
+            ass = build_ass(transcript, clip, style, speakers) if transcript is not None else None
             entry = _entry(clip, config.clip, ass)
             if not self.force and path.exists() and manifest.get(path.name) == entry:
                 clip_done(done)

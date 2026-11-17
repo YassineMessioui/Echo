@@ -227,7 +227,10 @@ def run_pipeline(
                 _record_skipped(job, name, started, settings)
                 emit(StageEvent(name, StageStatus.SKIPPED))
                 continue
-            if (forced or changed) and _has_force_field(stage):
+            # A forced stage redoes everything; one whose settings changed just runs, so a
+            # stage that tracks its outputs itself (the clip manifest) redoes only what
+            # actually differs.
+            if forced and _has_force_field(stage):
                 stage = dataclasses.replace(stage, force=True)
             running = StageRecord(status=StageStatus.RUNNING, started_at=started, settings=kept)
             _record(job, name, running)
