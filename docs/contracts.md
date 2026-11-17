@@ -47,3 +47,9 @@ flowchart LR
   `probe()`), which turns failures into `ExternalToolError` / `InvalidInputError`
   with the stderr tail. In tests, generate inputs with the `make_video` fixture and
   mark tests that need the real binaries with `@pytest.mark.ffmpeg`.
+- **Re-running on changed settings:** a stage can define `settings(config) -> str | None`
+  (a fingerprint of the config its outputs depend on). The orchestrator records it in
+  `job.json` and re-runs the stage, and so the later ones, when it changes.
+- **Progress:** call `echo.progress.report(fraction, detail)` inside `Stage.run`. It
+  becomes a `RUNNING` `StageEvent` with `progress` / `detail`. Report from the stage's
+  own thread, not from worker threads.
