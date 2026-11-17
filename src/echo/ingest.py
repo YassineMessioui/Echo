@@ -67,7 +67,7 @@ _: AudioExtractor = extract_audio
 
 @dataclass
 class IngestStage:
-    """Stage adapter: ``input.mp4`` → ``audio.wav``."""
+    """Stage adapter: ``input.mp4`` (or a link job's ``input-audio.m4a``) → ``audio.wav``."""
 
     extractor: AudioExtractor = extract_audio
 
@@ -77,4 +77,7 @@ class IngestStage:
         return [job.audio_path]
 
     def run(self, job: Job, config: PipelineConfig) -> None:
-        self.extractor(job.input_video, job.audio_path, config.ingest)
+        source = job.input_video
+        if not (source.is_file() or source.is_symlink()) and job.input_audio.is_file():
+            source = job.input_audio  # link job: only the audio was downloaded
+        self.extractor(source, job.audio_path, config.ingest)

@@ -98,3 +98,10 @@ def test_has_filter_parses_the_filter_list(monkeypatch):
         assert not ffmpeg.has_filter("drawtext")
     finally:
         ffmpeg._filters.cache_clear()
+
+
+@pytest.mark.ffmpeg
+def test_http_options_are_parsed():
+    options = ffmpeg.http_options()
+    assert {"headers", "reconnect", "multiple_requests"} <= options
+    assert all(not name.startswith("-") for name in options)

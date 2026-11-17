@@ -7,9 +7,12 @@ options and calls `echo.pipeline.run_pipeline(job, build_stages(config), config,
 echo-clips run VIDEO [OPTIONS]
 ```
 
-`VIDEO` is a local file or an `http(s)://` link (YouTube, Vimeo, …). A link is
-downloaded with [yt-dlp](https://github.com/yt-dlp/yt-dlp) into the job folder (best
-video up to 1080p + audio, merged to MP4). Without `--job-id`, the job is named after
+`VIDEO` is a local file or an `http(s)://` link (YouTube, Vimeo, …). For a link,
+[yt-dlp](https://github.com/yt-dlp/yt-dlp) downloads **only the audio** into the job
+folder, which is all transcription needs; the clip stage then reads just each clip's
+section of the video (up to 1080p) straight from the site. On a 68-min podcast that's
+~67 MB before transcription can start instead of ~240 MB. Sites whose streams can't be
+read that way fall back to downloading the full video. Without `--job-id`, the job is named after
 the site and video id (e.g. `youtube-jNQXAC9IVRw`), so running the same link again
 resumes that job instead of downloading it again. YouTube needs a JavaScript runtime
 (deno, node or bun on `PATH`). Only clip content you have the rights to use.
