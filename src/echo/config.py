@@ -10,11 +10,26 @@ class _Section(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+_RANGE_POINT = r"^(\d+(\.\d+)?%?)$"
+"""Seconds (``"120"``, ``"90.5"``) or a percentage of the video (``"15%"``)."""
+
+
 class IngestConfig(_Section):
     # The transcribe stage only accepts 16 kHz mono 16-bit PCM (``transcribe.load_wav``);
     # other values only make sense once another speech model needs them.
     sample_rate: int = 16_000
     channels: int = 1
+    start: str | None = Field(default=None, pattern=_RANGE_POINT)
+    """Focus range (#59): only process from here (seconds or ``"15%"``); None = start."""
+    end: str | None = Field(default=None, pattern=_RANGE_POINT)
+    """Focus range end (seconds or ``"85%"``); None = end of the video."""
+
+    @model_validator(mode="after")
+    def _percent_range(self) -> "IngestConfig":
+        for value in (self.start, self.end):
+            if value is not None and value.endswith("%") and float(value[:-1]) > 100:
+                raise ValueError(f"focus range {value!r} is over 100%")
+        return self
 
 
 class TranscribeConfig(_Section):
@@ -41,8 +56,14 @@ class TranscribeConfig(_Section):
     )
 
 
+AUTO_MAX_TOKENS = 3000
+"""What ``ChunkConfig.max_tokens="auto"`` resolves to when nothing more specific applies."""
+
+
 class ChunkConfig(_Section):
-    max_tokens: int = Field(default=3000, gt=0)
+    max_tokens: Annotated[int, Field(gt=0)] | Literal["auto"] = "auto"
+    """Window budget in tokens. ``"auto"`` picks one for the model (#63); until that lands
+    it means ``AUTO_MAX_TOKENS``."""
     overlap_segments: int = Field(default=5, ge=0)
 
 

@@ -53,8 +53,16 @@ class Segment(_Artifact):
 
 class Transcript(_Artifact):
     language: str
-    duration: float = Field(ge=0, description="Duration of the source audio in seconds.")
+    duration: float = Field(
+        ge=0, description="End of the transcribed audio, in seconds of the original video."
+    )
     segments: list[Segment]
+    offset: float = Field(
+        default=0.0,
+        ge=0,
+        description="Where audio.wav starts in the original video (focus range, #59). "
+        "Segment and word times are already in original-video time.",
+    )
 
     @model_validator(mode="after")
     def _consistent(self) -> Transcript:
@@ -162,6 +170,9 @@ class StageRecord(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error: str | None = None
+    settings: str | None = None
+    """Fingerprint of the settings that produced this stage's outputs (``Stage.settings``);
+    the stage re-runs when it changes."""
 
 
 class JobMeta(BaseModel):

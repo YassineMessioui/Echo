@@ -20,6 +20,13 @@ Behaviour of ``run_pipeline``:
   and then propagates, so no stage is left ``running``.
 - Re-running after a failure resumes at the failed stage, because the completed stages'
   outputs exist.
+- A stage may define ``settings(config) -> str | None``, a fingerprint of the settings
+  its outputs depend on. It's recorded in ``job.json`` (``StageRecord.settings``), and a
+  stage whose fingerprint changed re-runs even though its outputs exist (and so forces
+  the later stages). A job recorded before a stage had settings keeps its outputs and
+  adopts the current fingerprint.
+- While a stage runs, its ``echo.progress.report(fraction, detail)`` calls become
+  ``RUNNING`` events with ``progress`` / ``detail`` (non-decreasing, ending at 1.0).
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from echo import progress
 from echo.clip import ClipStage
 from echo.config import LLMConfig, PipelineConfig, TranscribeConfig
 from echo.errors import EchoError
@@ -62,12 +70,18 @@ class StageEvent:
     A stage that runs sends ``RUNNING`` then ``DONE`` or ``FAILED``. A skipped stage
     sends only ``SKIPPED``, and one whose ``outputs()`` fails sends only ``FAILED``.
     ``elapsed`` (seconds) is set on ``DONE`` / ``FAILED``, ``error`` on ``FAILED``.
+
+    In between, a running stage may send more ``RUNNING`` events with ``progress``
+    (0..1, non-decreasing) and a short ``detail`` (``"12:30 / 58:10"``, ``"window
+    4/15"``); the first ``RUNNING`` event has ``progress=None``.
     """
 
     stage: StageName
     status: StageStatus
     elapsed: float | None = None
     error: str | None = None
+    progress: float | None = None
+    detail: str = ""
 
 
 class PipelineError(EchoError):
@@ -187,15 +201,19 @@ def run_pipeline(
         started = datetime.now(UTC)
         t0 = time.perf_counter()
         try:
-            if not forced and all(path.exists() for path in stage.outputs(job)):
-                _record_skipped(job, name, started)
+            settings = _settings(stage, config)
+            previous = job.read_meta().stages[name].settings
+            changed = settings is not None and previous is not None and settings != previous
+            if not forced and not changed and all(p.exists() for p in stage.outputs(job)):
+                _record_skipped(job, name, started, settings)
                 emit(StageEvent(name, StageStatus.SKIPPED))
                 continue
-            if forced and _has_force_field(stage):
+            if (forced or changed) and _has_force_field(stage):
                 stage = dataclasses.replace(stage, force=True)
             _record(job, name, StageRecord(status=StageStatus.RUNNING, started_at=started))
             emit(StageEvent(name, StageStatus.RUNNING))
-            stage.run(job, config)
+            with progress.capture(_progress_sink(name, emit)):
+                stage.run(job, config)
         except EchoError as e:
             _fail(job, name, started, t0, str(e), emit)
             raise PipelineError(name, e) from e
@@ -206,7 +224,10 @@ def run_pipeline(
             _fail(job, name, started, t0, f"{type(e).__name__}: {e}".removesuffix(": "), emit)
             raise
         done = StageRecord(
-            status=StageStatus.DONE, started_at=started, finished_at=datetime.now(UTC)
+            status=StageStatus.DONE,
+            started_at=started,
+            finished_at=datetime.now(UTC),
+            settings=settings,
         )
         _record(job, name, done)
         emit(StageEvent(name, StageStatus.DONE, elapsed=time.perf_counter() - t0))
@@ -214,6 +235,23 @@ def run_pipeline(
         first_forced = min(first_forced, order.index(name) + 1)
 
     return job.read_meta()
+
+
+def _settings(stage: Stage, config: PipelineConfig) -> str | None:
+    """The stage's optional settings fingerprint (see the module docstring)."""
+    fingerprint = getattr(stage, "settings", None)
+    return fingerprint(config) if callable(fingerprint) else None
+
+
+def _progress_sink(name: StageName, emit: Callable[[StageEvent], None]) -> progress.ProgressSink:
+    """``echo.progress`` reports → RUNNING events, kept non-decreasing."""
+    best = [0.0]
+
+    def sink(fraction: float, detail: str) -> None:
+        best[0] = max(best[0], fraction)
+        emit(StageEvent(name, StageStatus.RUNNING, progress=best[0], detail=detail))
+
+    return sink
 
 
 def _has_force_field(stage: Stage) -> bool:
@@ -229,9 +267,14 @@ def _record(job: Job, name: StageName, record: StageRecord) -> None:
     job.write_meta(meta)
 
 
-def _record_skipped(job: Job, name: StageName, now: datetime) -> None:
-    """Mark ``name`` skipped, keeping the times of the run that produced its outputs."""
+def _record_skipped(job: Job, name: StageName, now: datetime, settings: str | None = None) -> None:
+    """Mark ``name`` skipped, keeping the times of the run that produced its outputs.
+
+    ``settings`` is kept from that run; a job recorded before the stage had settings
+    adopts the current fingerprint.
+    """
     previous = job.read_meta().stages[name]
+    settings = previous.settings or settings
     if previous.finished_at is not None and previous.status in (
         StageStatus.DONE,
         StageStatus.SKIPPED,
@@ -240,9 +283,10 @@ def _record_skipped(job: Job, name: StageName, now: datetime) -> None:
             status=StageStatus.SKIPPED,
             started_at=previous.started_at,
             finished_at=previous.finished_at,
+            settings=settings,
         )
     else:
-        record = StageRecord(status=StageStatus.SKIPPED, finished_at=now)
+        record = StageRecord(status=StageStatus.SKIPPED, finished_at=now, settings=settings)
     _record(job, name, record)
 
 

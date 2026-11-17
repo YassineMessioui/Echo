@@ -324,3 +324,71 @@ def test_skipped_stage_keeps_the_times_it_was_produced(job: Job) -> None:
     skipped = job.read_meta().stages[StageName.INGEST]
     assert skipped.status == StageStatus.SKIPPED
     assert (skipped.started_at, skipped.finished_at) == (produced.started_at, produced.finished_at)
+
+
+# --- settings fingerprints + progress (#59, #61, #82) ----------------------------------
+
+
+@dataclass
+class SettingsStage(FakeStage):
+    """Re-runs when ``value`` changes (like transcribe when the whisper model changes)."""
+
+    value: str = "a"
+
+    def settings(self, config: PipelineConfig) -> str:
+        return self.value
+
+
+def test_changed_settings_rerun_the_stage_and_later_ones(job: Job) -> None:
+    log: list[StageName] = []
+    stages = fake_stages(log)
+    stages[1] = SettingsStage(StageName.TRANSCRIBE, log, value="small")
+    run_pipeline(job, stages, CONFIG)
+    assert job.read_meta().stages[StageName.TRANSCRIBE].settings == "small"
+
+    log.clear()
+    run_pipeline(job, stages, CONFIG)
+    assert log == [], "same settings: skipped"
+
+    stages[1] = SettingsStage(StageName.TRANSCRIBE, log, value="medium")
+    log.clear()
+    run_pipeline(job, stages, CONFIG)
+    assert log == list(StageName)[1:]
+    assert job.read_meta().stages[StageName.TRANSCRIBE].settings == "medium"
+
+
+def test_old_job_without_settings_adopts_them_without_rerunning(job: Job) -> None:
+    log: list[StageName] = []
+    run_pipeline(job, fake_stages(log), CONFIG)  # recorded before the stage had settings
+    stages = fake_stages(log)
+    stages[1] = SettingsStage(StageName.TRANSCRIBE, log, value="small")
+    log.clear()
+    run_pipeline(job, stages, CONFIG)
+    assert log == []
+    assert job.read_meta().stages[StageName.TRANSCRIBE].settings == "small"
+
+
+def test_progress_reports_become_non_decreasing_running_events(job: Job) -> None:
+    from echo import progress
+
+    @dataclass
+    class Reporting(FakeStage):
+        def run(self, job: Job, config: PipelineConfig) -> None:
+            for fraction, detail in [(0.2, "1/5"), (0.6, "3/5"), (0.4, "late"), (1.5, "5/5")]:
+                progress.report(fraction, detail)
+            super().run(job, config)
+
+    events: list[StageEvent] = []
+    stages = [Reporting(StageName.INGEST, [])]
+    run_pipeline(job, stages, CONFIG, on_event=events.append)
+    running = [e for e in events if e.status is StageStatus.RUNNING]
+    assert running[0].progress is None
+    assert [e.progress for e in running[1:]] == [0.2, 0.6, 0.6, 1.0]
+    assert [e.detail for e in running[1:]] == ["1/5", "3/5", "late", "5/5"]
+    assert events[-1].status is StageStatus.DONE
+
+
+def test_progress_outside_a_run_is_a_no_op() -> None:
+    from echo import progress
+
+    progress.report(0.5, "nobody listening")  # must not raise

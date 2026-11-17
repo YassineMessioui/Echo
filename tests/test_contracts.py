@@ -283,3 +283,21 @@ def test_llm_max_concurrency_defaults_to_auto():
     for bad in (0, 17):  # 17+: a burst that free tiers answer with 429s
         with pytest.raises(ValidationError):
             LLMConfig(max_concurrency=bad)
+
+
+def test_focus_range_and_auto_window_config():
+    from echo.config import ChunkConfig, IngestConfig
+
+    assert IngestConfig().start is None and IngestConfig().end is None
+    assert IngestConfig(start="15%", end="3300").end == "3300"
+    for bad in ({"start": "150%"}, {"end": "1:30"}, {"start": "-5"}):
+        with pytest.raises(ValidationError):
+            IngestConfig(**bad)
+    assert ChunkConfig().max_tokens == "auto"
+    assert ChunkConfig(max_tokens=24_000).max_tokens == 24_000
+    with pytest.raises(ValidationError):
+        ChunkConfig(max_tokens=0)
+
+
+def test_transcript_offset_defaults_to_zero(golden_job: Job):
+    assert golden_job.read_transcript().offset == 0.0
