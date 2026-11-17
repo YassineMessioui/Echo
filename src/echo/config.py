@@ -116,6 +116,11 @@ class ClipConfig(_Section):
     """Fill for sources narrower than 9:16, which are padded instead of cropped."""
     crop_x: float = Field(default=0.5, ge=0.0, le=1.0)
     """Horizontal crop position for 9:16 (0 = left edge, 0.5 = centre, 1 = right edge)."""
+    max_workers: int | None = Field(default=None, ge=1, le=16)
+    """Clips cut at once (#57); 1 = one after another. None = auto: 1 for a local video
+    (one libx264 encode already uses every core), up to 4 for a link job's remote video
+    (each cut mostly waits on the network); see ``echo.clip.clip_workers``. It doesn't
+    change the output, so it isn't part of the clip fingerprints."""
 
 
 HexColour = Annotated[str, Field(pattern=r"^#[0-9A-Fa-f]{6}$")]

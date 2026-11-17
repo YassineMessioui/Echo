@@ -367,3 +367,21 @@ def test_diarize_and_speaker_caption_config():
         CaptionConfig(speaker_colours=[])
     with pytest.raises(ValidationError):
         CaptionConfig(speaker_colours=["blue"])
+
+
+def test_clip_max_workers_defaults_to_auto():
+    from echo.clip import ClipStage
+    from echo.config import ClipConfig
+
+    assert ClipConfig().max_workers is None  # auto, resolved by echo.clip (#57)
+    assert ClipConfig(max_workers=2).max_workers == 2
+    for bad in (0, 17):
+        with pytest.raises(ValidationError):
+            ClipConfig(max_workers=bad)
+    # The worker count doesn't change the clips, so it must not trigger a re-cut, and
+    # adding the field kept the fingerprint of jobs clipped before it existed.
+    stage = ClipStage()
+    assert stage.settings(PipelineConfig()) == "4085042afc176b3f"
+    for workers in (1, 4):
+        workers_set = PipelineConfig(clip=ClipConfig(max_workers=workers))
+        assert stage.settings(workers_set) == stage.settings(PipelineConfig())

@@ -278,6 +278,15 @@ def test_changed_encode_settings_are_recut(job_copy):
     assert len(clipper.cut) == 2
 
 
+def test_max_workers_does_not_recut(job_copy):
+    """The worker count (#57) isn't in the manifest's fingerprint."""
+    job = _job_with_video(job_copy)
+    ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
+    clipper = RecordingClipper()
+    ClipStage(clipper=clipper).run(job, PipelineConfig(clip=ClipConfig(max_workers=4)))
+    assert clipper.cut == []
+
+
 def test_clips_no_longer_wanted_are_deleted(job_copy):
     job = _job_with_video(job_copy)
     ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())

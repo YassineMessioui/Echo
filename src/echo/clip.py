@@ -182,8 +182,14 @@ def _clip_hash(clip: ClipSpec) -> str:
     return _hash(clip.model_dump(mode="json"))
 
 
+def _clip_settings(config: ClipConfig) -> dict[str, object]:
+    """``config`` minus what doesn't change the output (``max_workers``), so changing it
+    re-cuts nothing and older fingerprints stay valid."""
+    return config.model_dump(mode="json", exclude={"max_workers"})
+
+
 def _entry(clip: ClipSpec, config: ClipConfig, captions: str | None) -> dict[str, str]:
-    entry = {"clip": _clip_hash(clip), "config": _hash(config.model_dump(mode="json"))}
+    entry = {"clip": _clip_hash(clip), "config": _hash(_clip_settings(config))}
     if captions is not None:
         # The caption track's content: re-transcribing or restyling re-cuts the clip.
         entry["captions"] = _hash(captions)
@@ -226,7 +232,7 @@ class ClipStage:
         """Fingerprint of everything besides the clip boundaries that changes the clips."""
         return _hash(
             {
-                "clip": config.clip.model_dump(mode="json"),
+                "clip": _clip_settings(config.clip),
                 "caption": config.caption.model_dump(mode="json"),
                 "speakers": config.diarize.enabled,
             }
