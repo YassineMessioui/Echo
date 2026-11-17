@@ -301,3 +301,12 @@ def test_focus_range_and_auto_window_config():
 
 def test_transcript_offset_defaults_to_zero(golden_job: Job):
     assert golden_job.read_transcript().offset == 0.0
+
+
+@pytest.mark.parametrize(("start", "end"), [("50%", "20%"), ("90", "30"), ("40%", "40%")])
+def test_focus_range_rejects_inverted_same_unit_pairs(start, end):
+    from echo.config import IngestConfig
+
+    with pytest.raises(ValidationError, match="empty or inverted"):
+        IngestConfig(start=start, end=end)
+    IngestConfig(start="600", end="5%")  # mixed units: checked by ingest instead
