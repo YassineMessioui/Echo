@@ -56,8 +56,10 @@ def test_no_range_is_the_whole_input():
 @pytest.mark.parametrize(
     ("start", "end", "match"),
     [
-        ("50", "50", "empty or inverted"),
+        # Same-unit pairs like 50:50 are rejected by IngestConfig itself (#86); ingest
+        # catches what needs the duration: mixed units and ranges past the end.
         ("60", "40%", "empty or inverted"),
+        ("50", "50%", "empty or inverted"),
         ("100", None, "past the end"),
         ("100%", None, "past the end"),
         (None, "120", "past the end"),
@@ -369,3 +371,10 @@ def test_whole_video_range_is_no_range():
     assert parse_range("0%:100%") == {"start": None, "end": None}
     assert parse_range("90.25:3600") == {"start": "90.25", "end": "3600"}
     assert parse_range("1:123456789")["end"] == "123456789"
+
+
+def test_same_unit_inverted_ranges_are_rejected_by_the_config():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="empty or inverted"):
+        _range("50", "50")
