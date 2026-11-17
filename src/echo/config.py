@@ -39,9 +39,9 @@ class LLMConfig(_Section):
     max_concurrency: int | None = Field(
         default=None,
         ge=1,
-        description="Transcript windows sent to the LLM at once (#56). None = 4 for hosted "
-        "providers, 1 for Ollama (a local server queues requests, and queued ones could "
-        "time out); 1 = one after another.",
+        le=16,
+        description="Transcript windows sent to the LLM at once (#56); 1 = one after "
+        "another. None = a per-provider default (see ``echo.llm.merge.concurrency``).",
     )
 
 

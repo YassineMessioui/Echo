@@ -261,5 +261,6 @@ def test_refine_max_clips_and_caption_font_defaults():
 def test_llm_max_concurrency_defaults_to_auto():
     assert LLMConfig().max_concurrency is None  # 4 hosted, 1 Ollama (resolved by the stage)
     assert LLMConfig(max_concurrency=1).max_concurrency == 1
-    with pytest.raises(ValidationError):
-        LLMConfig(max_concurrency=0)
+    for bad in (0, 17):  # 17+: a burst that free tiers answer with 429s
+        with pytest.raises(ValidationError):
+            LLMConfig(max_concurrency=bad)
