@@ -1,13 +1,15 @@
 import pytest
 
-from echo.config import ChunkConfig
+from echo.config import AUTO_MAX_TOKENS, ChunkConfig, LLMConfig
 from echo.job import Job
 from echo.llm.chunking import (
+    LONG_CONTEXT_MAX_TOKENS,
     WindowChunker,
     approx_tokens,
     chunk_transcript,
     format_segment,
     format_timestamp,
+    resolve_max_tokens,
 )
 from echo.models import Segment, Transcript, TranscriptWindow
 
@@ -103,3 +105,74 @@ def test_pluggable_token_counter():
     chunker = WindowChunker(count_tokens=lambda _: 1)
     windows = chunker(transcript, ChunkConfig(max_tokens=2, overlap_segments=0))
     assert [(w.start_segment, w.end_segment) for w in windows] == [(0, 1), (2, 3)]
+
+
+# --- "auto" window budget (#63) ---------------------------------------------------
+
+LONG, SHORT = LONG_CONTEXT_MAX_TOKENS, AUTO_MAX_TOKENS
+
+
+@pytest.mark.parametrize(
+    ("llm", "expected"),
+    [
+        ({}, SHORT),  # Ollama defaults
+        ({"provider": "ollama", "model": "llama3.3:70b"}, SHORT),  # local: always small
+        ({"provider": "ollama", "model": "gpt-oss:120b"}, SHORT),
+        # Hosted providers on their default model
+        ({"provider": "groq"}, LONG),
+        ({"provider": "openrouter"}, LONG),
+        ({"provider": "gemini"}, LONG),
+        ({"provider": "mistral"}, LONG),
+        ({"provider": "openai"}, LONG),
+        # Hosted, explicit models
+        ({"provider": "groq", "model": "openai/gpt-oss-120b"}, LONG),
+        ({"provider": "groq", "model": "llama-3.1-8b-instant"}, SHORT),
+        ({"provider": "gemini", "model": "gemini-flash-lite-latest"}, LONG),
+        ({"provider": "gemini", "model": "gemini-2.5-flash-lite"}, LONG),
+        ({"provider": "gemini", "model": "gemini-flash-latest"}, LONG),
+        ({"provider": "openrouter", "model": "meta-llama/llama-3.3-70b-instruct:free"}, LONG),
+        ({"provider": "openrouter", "model": "some/unknown-model"}, SHORT),
+        ({"provider": "mistral", "model": "mistral-small-latest"}, LONG),
+        ({"provider": "mistral", "model": "open-mistral-7b"}, SHORT),
+        ({"provider": "openai", "model": "gpt-4.1-mini"}, LONG),
+        ({"provider": "openai", "model": "GPT-4.1-mini"}, LONG),  # case-insensitive
+        # Generic server: small unless the model is known
+        ({"provider": "openai-compatible", "model": "llama3.2:3b"}, SHORT),
+        ({"provider": "openai-compatible", "model": "local-model"}, SHORT),
+        ({"provider": "openai-compatible", "model": "openai/gpt-oss-120b"}, LONG),
+        # Unknown provider
+        ({"provider": "nope", "model": "gpt-4.1-mini"}, SHORT),
+    ],
+)
+def test_auto_resolves_per_provider_and_model(llm: dict, expected: int):
+    assert resolve_max_tokens(ChunkConfig(), LLMConfig(**llm)) == expected
+
+
+def test_auto_without_llm_config_is_the_small_budget():
+    assert resolve_max_tokens(ChunkConfig()) == AUTO_MAX_TOKENS == 3000
+    assert LONG_CONTEXT_MAX_TOKENS == 12_000
+
+
+@pytest.mark.parametrize("llm", [{}, {"provider": "groq"}, {"provider": "gemini"}])
+def test_explicit_max_tokens_wins(llm: dict):
+    assert resolve_max_tokens(ChunkConfig(max_tokens=1234), LLMConfig(**llm)) == 1234
+
+
+def test_chunker_uses_the_resolved_budget():
+    # 2000 segments of ~85 tokens each (~170k tokens): 64 windows at 3k, 15 at 12k.
+    transcript = _transcript([("word " * 60).strip()] * 2000)
+    small = WindowChunker(llm=LLMConfig())(transcript, ChunkConfig())
+    big = WindowChunker(llm=LLMConfig(provider="gemini"))(transcript, ChunkConfig())
+    explicit = WindowChunker(llm=LLMConfig(provider="gemini"))(
+        transcript, ChunkConfig(max_tokens=3000)
+    )
+
+    assert [(w.start_segment, w.end_segment) for w in small] == [
+        (w.start_segment, w.end_segment) for w in explicit
+    ]
+    assert len(small) == 64
+    assert len(big) == 15
+    for windows, budget in [(small, SHORT), (big, LONG)]:
+        _check_invariants(transcript, windows, ChunkConfig(max_tokens=budget))
+        for prev, cur in zip(windows, windows[1:], strict=False):
+            assert prev.end_segment - cur.start_segment + 1 == 5, "overlap is kept"

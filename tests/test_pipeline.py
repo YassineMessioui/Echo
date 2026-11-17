@@ -283,6 +283,14 @@ def test_build_stages_is_lazy(monkeypatch: pytest.MonkeyPatch, job: Job) -> None
         stage.outputs(job)
 
 
+def test_build_stages_chunks_for_the_configured_model() -> None:
+    """``chunk.max_tokens = "auto"`` follows ``llm`` (#63): the chunker sees the LLM config."""
+    config = PipelineConfig(llm={"provider": "gemini"})
+    llm = build_stages(config)[2]
+    assert isinstance(llm, LLMStage)
+    assert llm.chunker.llm == config.llm
+
+
 def test_build_stages_creates_resources_when_run(
     monkeypatch: pytest.MonkeyPatch, job_copy: Job
 ) -> None:
