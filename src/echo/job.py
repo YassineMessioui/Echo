@@ -1,7 +1,8 @@
 """Job directory: the on-disk contract between stages.
 
 jobs/<job_id>/
-  input.mp4              # symlink to the source video
+  input.mp4              # symlink to the source video (local files)
+  input-audio.m4a        # link jobs: only the audio is downloaded (#60); see RemoteVideo
   audio.wav              # stage: ingest
   transcript.json        # stage: transcribe
   topics.json            # stage: llm
@@ -114,6 +115,13 @@ class Job:
     @property
     def input_video(self) -> Path:
         return self.root / "input.mp4"
+
+    @property
+    def input_audio(self) -> Path:
+        """Link jobs only: the downloaded audio track. The video stays remote and only the
+        clip sections are read (``echo.interfaces.RemoteVideo``). Content may be any
+        container ffmpeg reads, whatever the extension."""
+        return self.root / "input-audio.m4a"
 
     @property
     def audio_path(self) -> Path:
