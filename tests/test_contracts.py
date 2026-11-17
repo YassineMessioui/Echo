@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from echo.config import PipelineConfig, RefineConfig
+from echo.config import PipelineConfig, RefineConfig, TranscribeConfig
 from echo.errors import ArtifactError, InvalidInputError, LLMError
 from echo.interfaces import LLMClient
 from echo.job import Job, slugify
@@ -256,3 +256,13 @@ def test_refine_max_clips_and_caption_font_defaults():
     with pytest.raises(ValidationError):
         RefineConfig(max_clips=0)
     assert CaptionConfig().font == "Montserrat ExtraBold"
+
+
+def test_transcribe_batching_and_vad_defaults():
+    config = TranscribeConfig()
+    assert (config.batch_size, config.vad_filter, config.vad_min_silence_ms) == (0, True, None)
+    assert TranscribeConfig(batch_size=8).batch_size == 8  # batched pipeline
+    with pytest.raises(ValidationError):
+        TranscribeConfig(batch_size=-1)
+    with pytest.raises(ValidationError):
+        TranscribeConfig(vad_min_silence_ms=-1)

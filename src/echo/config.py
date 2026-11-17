@@ -22,6 +22,21 @@ class TranscribeConfig(_Section):
     device: str = "auto"
     compute_type: str = "default"
     language: str | None = Field(default=None, description="None = auto-detect.")
+    batch_size: int = Field(
+        default=0,
+        ge=0,
+        description="Decode this many ~30 s chunks at once (faster-whisper's batched "
+        "pipeline, best on a GPU); 0 = the sequential decoder, more accurate on a CPU (#58).",
+    )
+    vad_filter: bool = Field(
+        default=True, description="Skip silence and music with Silero VAD before decoding."
+    )
+    vad_min_silence_ms: int | None = Field(
+        default=None,
+        ge=0,
+        description="Silence (ms) that ends a speech chunk. None = faster-whisper's "
+        "default for the mode (160 ms batched, 2000 ms sequential).",
+    )
 
 
 class ChunkConfig(_Section):
