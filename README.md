@@ -163,7 +163,7 @@ The Whisper model (`small` by default) downloads on the first run.
   ```
 - **Windows:** install the [CUDA Toolkit 12](https://developer.nvidia.com/cuda-downloads) and [cuDNN 9](https://developer.nvidia.com/cudnn-downloads) and make sure their `bin` folders are on `PATH` (`cublas64_12.dll`, `cudnn64_9.dll`).
 
-Silence and music are skipped by voice activity detection (`TranscribeConfig.vad_filter`). On a GPU, `TranscribeConfig.batch_size = 8` decodes several ~30 s chunks at once. On a CPU it is ~2× faster but drops ~3 % of the words; a smaller model run sequentially is a better trade, so batching is off by default (benchmarks in #58). Changing the whisper settings (`model_size`, `language`, `batch_size`, `vad_*`) on an existing job re-transcribes it automatically, and re-runs the later stages; `device` and `compute_type` don't. `job.json` records the mode as `models.whisper_mode` (e.g. `"batched-8, vad"`).
+Silence and music are skipped by voice activity detection (`TranscribeConfig.vad_filter`). On a GPU, `TranscribeConfig.batch_size = 8` decodes several ~30 s chunks at once. On a CPU it is ~2× faster but drops ~3 % of the words; a smaller model run sequentially is a better trade, so batching is off by default (benchmarks in #58). Changing the whisper settings (`model_size`, `language`, batched vs sequential, `vad_*`) on an existing job re-transcribes it automatically, and re-runs the later stages; `device`, `compute_type` and the batch size alone don't. `job.json` records the mode as `models.whisper_mode` (e.g. `"batched-8, vad"`).
 
 ### Setup
 

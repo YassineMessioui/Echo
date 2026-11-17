@@ -263,7 +263,9 @@ class TranscribeStage:
         ``"small|lang=auto|sequential|vad(min_silence=2000ms)"``.
 
         The orchestrator re-transcribes when it differs from the one in ``job.json``.
-        It covers ``model_size``, ``language``, ``batch_size`` and the ``vad_*`` fields.
+        It covers ``model_size``, ``language``, batched vs sequential and the ``vad_*``
+        fields. The batch *size* is left out: batched-8 and batched-16 give word-for-word
+        identical transcripts (#79 benchmarks), so it only changes speed.
         ``device`` and ``compute_type`` are left out: they choose where, and at what
         precision, the same model runs (the CUDA → CPU fallback changes both at run
         time), so switching them keeps the transcript. An unset ``vad_min_silence_ms``
@@ -277,7 +279,8 @@ class TranscribeStage:
             vad = f"vad(min_silence={min_silence}ms)"
         else:
             vad = "no-vad"
-        return f"{t.model_size}|lang={t.language or 'auto'}|{self._mode(t)}|{vad}"
+        decode = "batched" if t.batch_size else "sequential"
+        return f"{t.model_size}|lang={t.language or 'auto'}|{decode}|{vad}"
 
     @staticmethod
     def _mode(t: TranscribeConfig) -> str:

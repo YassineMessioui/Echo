@@ -246,7 +246,7 @@ def test_settings_fingerprint_is_readable():
     assert stage.settings(_config()) == "small|lang=auto|sequential|vad(min_silence=2000ms)"
     assert (
         stage.settings(_config(model_size="tiny", language="fr", batch_size=8))
-        == "tiny|lang=fr|batched-8|vad(min_silence=160ms)"
+        == "tiny|lang=fr|batched|vad(min_silence=160ms)"
     )
     assert (
         stage.settings(_config(vad_filter=False, vad_min_silence_ms=500))
@@ -616,3 +616,12 @@ def test_failed_cpu_retry_keeps_the_cuda_error(audio: Path):
     )
     with pytest.raises(TranscriptionError, match=r"(?s)cublas64_12\.dll.*disk full"):
         transcriber.transcribe(audio)
+
+
+def test_batch_size_alone_does_not_re_transcribe(transcribed: tuple[Job, FakeTranscriber]):
+    job, fake = transcribed
+    run_pipeline(job, [TranscribeStage(fake)], _config(batch_size=8))
+    assert len(fake.calls) == 2  # sequential → batched: re-run
+    run_pipeline(job, [TranscribeStage(fake)], _config(batch_size=16))
+    assert len(fake.calls) == 2, "8 → 16 only changes speed"
+    assert job.read_meta().models["whisper_mode"] == "batched-8, vad"
