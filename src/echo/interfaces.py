@@ -11,6 +11,7 @@ failures.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -107,10 +108,26 @@ class BoundaryRefiner(Protocol):
 # --- stage: clip ------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class RemoteVideo:
+    """A video read over HTTP(S) instead of from disk (link jobs, #60).
+
+    ffmpeg seeks into ``url`` with range requests, so cutting a clip only fetches that
+    clip's bytes. The audio comes from the local ``audio`` file (``Job.input_audio``).
+    ``url`` is a direct stream URL that expires, so resolve it right before cutting.
+    """
+
+    url: str
+    audio: Path
+    width: int
+    height: int
+    headers: dict[str, str] = field(default_factory=dict)
+
+
 class Clipper(Protocol):
     def __call__(
         self,
-        video: Path,
+        video: Path | RemoteVideo,
         clips: list[ClipSpec],
         outputs: list[Path],
         config: ClipConfig,

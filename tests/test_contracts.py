@@ -258,6 +258,15 @@ def test_refine_max_clips_and_caption_font_defaults():
     assert CaptionConfig().font == "Montserrat ExtraBold"
 
 
+def test_link_job_paths_and_remote_video(tmp_path: Path):
+    from echo.interfaces import RemoteVideo
+
+    job = Job(tmp_path / "youtube-x")
+    assert job.input_audio == job.root / "input-audio.m4a"
+    remote = RemoteVideo(url="https://example/v", audio=job.input_audio, width=1920, height=1080)
+    assert remote.headers == {}
+
+
 def test_llm_max_concurrency_defaults_to_auto():
     assert LLMConfig().max_concurrency is None  # 4 hosted, 1 Ollama (resolved by the stage)
     assert LLMConfig(max_concurrency=1).max_concurrency == 1
