@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from echo.config import PipelineConfig, RefineConfig, TranscribeConfig
+from echo.config import LLMConfig, PipelineConfig, RefineConfig, TranscribeConfig
 from echo.errors import ArtifactError, InvalidInputError, LLMError
 from echo.interfaces import LLMClient
 from echo.job import Job, slugify
@@ -275,3 +275,11 @@ def test_transcribe_batching_and_vad_defaults():
         TranscribeConfig(batch_size=-1)
     with pytest.raises(ValidationError):
         TranscribeConfig(vad_min_silence_ms=-1)
+
+
+def test_llm_max_concurrency_defaults_to_auto():
+    assert LLMConfig().max_concurrency is None  # 4 hosted, 1 Ollama (resolved by the stage)
+    assert LLMConfig(max_concurrency=1).max_concurrency == 1
+    for bad in (0, 17):  # 17+: a burst that free tiers answer with 429s
+        with pytest.raises(ValidationError):
+            LLMConfig(max_concurrency=bad)

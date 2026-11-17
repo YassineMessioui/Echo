@@ -53,6 +53,13 @@ class LLMConfig(_Section):
     temperature: float = 0.0
     timeout_s: float = 120.0
     max_retries: int = Field(default=2, ge=0)
+    max_concurrency: int | None = Field(
+        default=None,
+        ge=1,
+        le=16,
+        description="Transcript windows sent to the LLM at once (#56); 1 = one after "
+        "another. None = a per-provider default (see ``echo.llm.merge.concurrency``).",
+    )
 
 
 class RefineConfig(_Section):
