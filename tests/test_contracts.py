@@ -258,6 +258,15 @@ def test_refine_max_clips_and_caption_font_defaults():
     assert CaptionConfig().font == "Montserrat ExtraBold"
 
 
+def test_link_job_paths_and_remote_video(tmp_path: Path):
+    from echo.interfaces import RemoteVideo
+
+    job = Job(tmp_path / "youtube-x")
+    assert job.input_audio == job.root / "input-audio.m4a"
+    remote = RemoteVideo(url="https://example/v", audio=job.input_audio, width=1920, height=1080)
+    assert remote.headers == {}
+
+
 def test_transcribe_batching_and_vad_defaults():
     config = TranscribeConfig()
     assert (config.batch_size, config.vad_filter, config.vad_min_silence_ms) == (0, True, None)

@@ -178,7 +178,7 @@ The CLI is called `echo-clips` because `echo` clashes with the shell builtin:
 
 ```bash
 uv run echo-clips run episode.mp4                         # → jobs/<job_id>/clips/*.mp4
-uv run echo-clips run "https://youtu.be/VIDEO_ID"         # a link: downloaded with yt-dlp first
+uv run echo-clips run "https://youtu.be/VIDEO_ID"         # a link: audio downloaded, clips read remotely
 uv run echo-clips run episode.mp4 --job-id ep42           # name the job; re-run to resume it
 uv run echo-clips run episode.mp4 --job-id ep42 --from-stage refine --max-duration 45
 uv run echo-clips run episode.mp4 --job-id ep42 --force   # redo every stage

@@ -1,10 +1,13 @@
 """Video links as input (#60): download a URL with yt-dlp into the job directory.
 
-``echo-clips run <URL>`` probes the link (no download), picks a job id from the site
-and video id (``youtube-jNQXAC9IVRw``), and downloads the best video up to 1080p plus
-audio, merged to MP4, as the job's ``input.mp4``. Running the same link again reopens
-that job and skips the download, whichever URL form is used (``youtu.be/...``,
-``youtube.com/watch?v=...``).
+``echo-clips run <URL>`` probes the link (no download) and picks a job id from the site
+and video id (``youtube-jNQXAC9IVRw``). Only the **audio** is downloaded
+(``input-audio.m4a``), which is all ingest and transcription need; the clip stage later
+reads just each clip's section of the video over HTTP (``RemoteVideo``, #75). On a
+68-min podcast that's ~67 MB instead of ~240 MB before transcription can start. Streams
+ffmpeg can't seek into fall back to downloading the full video as ``input.mp4``.
+Running the same link again reopens that job and skips the download, whichever URL
+form is used (``youtu.be/...``, ``youtube.com/watch?v=...``).
 
 Only clip content you have the rights to use.
 """
@@ -24,12 +27,21 @@ from urllib.parse import urlparse
 
 from yt_dlp.utils import DownloadError
 
-from echo.errors import InvalidInputError
+from echo.errors import ArtifactError, InvalidInputError
+from echo.interfaces import RemoteVideo
 from echo.job import Job
 from echo.models import JobMeta
 
 FORMAT = "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/b"
-"""Best video up to 1080p + best audio; MP4/M4A first so merging needs no re-encode."""
+"""Full download (fallback): best video up to 1080p + best audio, merged to MP4."""
+
+AUDIO_FORMAT = "ba[ext=m4a]/ba"
+
+VIDEO_FORMAT = "bv*[height<=1080][vcodec^=avc1]/bv*[height<=1080]/b[height<=1080]/b"
+"""Video read remotely at clip time; H.264 first because it's the cheapest to decode."""
+
+SEEKABLE_PROTOCOLS = frozenset({"http", "https", "m3u8", "m3u8_native"})
+"""Streams ffmpeg can seek into over the network (fragmented DASH can't be)."""
 
 JS_RUNTIMES = ("deno", "node", "bun")
 """YouTube needs a JavaScript runtime; yt-dlp only enables deno by default."""
@@ -68,6 +80,12 @@ class VideoInfo:
     title: str | None = None
     uploader: str | None = None
     duration: float | None = None
+    video_protocol: str | None = None
+    """Protocol of the ``VIDEO_FORMAT`` stream; decides remote vs full download."""
+
+    @property
+    def seekable(self) -> bool:
+        return self.video_protocol in SEEKABLE_PROTOCOLS
 
     @property
     def job_id(self) -> str:
@@ -104,13 +122,7 @@ def probe_url(url: str, *, ydl_factory: YDLFactory = _default_factory) -> VideoI
     Raises InvalidInputError for private, removed, geo-blocked or unsupported links, and
     for playlists (pass a single video).
     """
-    try:
-        with ydl_factory(_base_params()) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except DownloadError as e:
-        raise _error(url, e) from e
-    if info.get("_type") in ("playlist", "multi_video"):
-        raise InvalidInputError(f"{url} is a playlist; pass a link to a single video")
+    info = _extract(url, ydl_factory)
     return VideoInfo(
         url=url,
         id=str(info["id"]),
@@ -118,17 +130,71 @@ def probe_url(url: str, *, ydl_factory: YDLFactory = _default_factory) -> VideoI
         title=info.get("title"),
         uploader=info.get("uploader"),
         duration=info.get("duration"),
+        video_protocol=_video_format(info).get("protocol"),
     )
+
+
+def _extract(url: str, ydl_factory: YDLFactory) -> dict[str, Any]:
+    try:
+        with ydl_factory(_base_params() | {"format": VIDEO_FORMAT}) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except DownloadError as e:
+        raise _error(url, e) from e
+    if info.get("_type") in ("playlist", "multi_video"):
+        raise InvalidInputError(f"{url} is a playlist; pass a link to a single video")
+    return info
+
+
+def _video_format(info: dict[str, Any]) -> dict[str, Any]:
+    """The selected video stream: the video part of a merged pair, or the single format."""
+    for f in info.get("requested_formats") or [info]:
+        if f.get("vcodec") not in (None, "none"):
+            return f
+    return info
+
+
+def resolve_video(
+    url: str, audio: Path, *, ydl_factory: YDLFactory = _default_factory
+) -> RemoteVideo | None:
+    """A fresh ``RemoteVideo`` for ``url`` (stream URLs expire, so call this right before
+    cutting), or None if ffmpeg can't seek into the stream."""
+    f = _video_format(_extract(url, ydl_factory))
+    if f.get("protocol") not in SEEKABLE_PROTOCOLS or not f.get("width") or not f.get("height"):
+        return None
+    return RemoteVideo(
+        url=f["url"],
+        audio=audio,
+        width=int(f["width"]),
+        height=int(f["height"]),
+        headers={str(k): str(v) for k, v in (f.get("http_headers") or {}).items()},
+    )
+
+
+def video_source(job: Job, *, ydl_factory: YDLFactory = _default_factory) -> Path | RemoteVideo:
+    """What the clip stage cuts from: the local ``input.mp4``, or, for a link job, the
+    remote video (downloading it in full only if the stream can't be read remotely)."""
+    if job.input_video.is_file():
+        return job.input_video
+    url = job.read_meta().source_url if job.meta_path.is_file() else None
+    if url is None or not job.input_audio.is_file():
+        raise ArtifactError(f"missing artifact: {job.input_video}")
+    remote = resolve_video(url, job.input_audio, ydl_factory=ydl_factory)
+    if remote is not None:
+        return remote
+    download_video(url, job.input_video, ydl_factory=ydl_factory)
+    return job.input_video
 
 
 def download_video(
     url: str,
     out: Path,
     *,
+    format_spec: str = FORMAT,
     on_progress: ProgressCallback | None = None,
     ydl_factory: YDLFactory = _default_factory,
 ) -> None:
-    """Download ``url`` to ``out`` atomically (a failed download leaves nothing at ``out``)."""
+    """Download ``url`` (``format_spec``: the full video by default) to ``out`` atomically: a
+    failed download leaves nothing at ``out``."""
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp_dir = Path(tempfile.mkdtemp(dir=out.parent, prefix=".download-"))
 
@@ -140,7 +206,7 @@ def download_video(
             on_progress(min(1.0, status.get("downloaded_bytes", 0) / total))
 
     params = _base_params() | {
-        "format": FORMAT,
+        "format": format_spec,
         "merge_output_format": "mp4",
         "outtmpl": str(tmp_dir / "video.%(ext)s"),
         "progress_hooks": [hook],
@@ -183,8 +249,14 @@ def job_from_url(
         if previous != (info.extractor, info.id):
             raise InvalidInputError(f"job {job.job_id!r} was created for {meta.source}, not {url}")
     job.root.mkdir(parents=True, exist_ok=True)
-    if not job.input_video.exists():
-        download_video(url, job.input_video, on_progress=on_progress, ydl_factory=ydl_factory)
+    if not (job.input_video.exists() or job.input_audio.exists()):
+        if info.seekable:
+            out, format_spec = job.input_audio, AUDIO_FORMAT
+        else:
+            out, format_spec = job.input_video, FORMAT
+        download_video(
+            url, out, format_spec=format_spec, on_progress=on_progress, ydl_factory=ydl_factory
+        )
     if not job.meta_path.exists():
         job.write_meta(
             JobMeta(
