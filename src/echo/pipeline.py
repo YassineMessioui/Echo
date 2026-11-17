@@ -105,7 +105,7 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
     return [
         IngestStage(),
         TranscribeStage(_LazyTranscriber(config.transcribe)),
-        LLMStage(WindowChunker(), extractor, models=_LLMModels(extractor)),
+        LLMStage(WindowChunker(llm=config.llm), extractor, models=_LLMModels(extractor)),
         RefineStage(),
         ClipStage(),
     ]

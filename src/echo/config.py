@@ -68,8 +68,9 @@ AUTO_MAX_TOKENS = 3000
 
 class ChunkConfig(_Section):
     max_tokens: Annotated[int, Field(gt=0)] | Literal["auto"] = "auto"
-    """Window budget in tokens. ``"auto"`` picks one for the model (#63); until that lands
-    it means ``AUTO_MAX_TOKENS``."""
+    """Window budget in tokens. ``"auto"`` picks one for the model
+    (``echo.llm.chunking.resolve_max_tokens``, #63): 12k for long-context hosted models,
+    otherwise ``AUTO_MAX_TOKENS``."""
     overlap_segments: int = Field(default=5, ge=0)
 
 
