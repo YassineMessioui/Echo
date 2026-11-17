@@ -1,3 +1,5 @@
+import http.server
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,9 +16,10 @@ from echo.clip import (
     clip_paths,
     cut_clips,
 )
-from echo.config import ClipConfig, PipelineConfig
+from echo.config import CaptionConfig, ClipConfig, PipelineConfig
 from echo.errors import ArtifactError, ExternalToolError, InvalidInputError
 from echo.ffmpeg import probe
+from echo.interfaces import RemoteVideo
 from echo.job import Job
 from echo.models import ClipSpec, StageName
 from echo.reframe import TARGET
@@ -592,3 +595,97 @@ def test_video_filter_and_extra_filter_together(monkeypatch, tmp_path):
     )
     args = seen[0]
     assert args[args.index("-vf") + 1] == "scale=540:960,eq=gamma=1.1"
+
+
+# --- remote video (link jobs, #75) -----------------------------------------------------
+
+
+def test_args_for_remote_video_read_only_the_clip_and_local_audio(tmp_path):
+    remote = RemoteVideo(
+        url="https://video.example/137",
+        audio=tmp_path / "input-audio.m4a",
+        width=1920,
+        height=1080,
+        headers={"User-Agent": "UA"},
+    )
+    args = build_ffmpeg_args(
+        remote, ClipSpec.between("t", 12.5, 40.0), tmp_path / "o", ClipConfig()
+    )
+    assert args[args.index("-headers") + 1] == "User-Agent: UA\r\n"
+    assert args[args.index("-request_size") + 1] == str(2**20)  # avoids YouTube throttling
+    inputs = [args[i + 1] for i, a in enumerate(args) if a == "-i"]
+    assert inputs == ["https://video.example/137", str(remote.audio)]
+    assert args.count("-ss") == 2 and args[args.index("-ss") + 1] == "12.500"
+    assert args[args.index("-map") + 1 : args.index("-map") + 4] == ["0:v:0", "-map", "1:a:0"]
+
+
+def test_stage_resolves_the_source_once_and_only_when_cutting(job_copy):
+    job = job_copy
+    job.input_audio.write_bytes(b"audio")
+    remote = RemoteVideo(url="https://v", audio=job.input_audio, width=1920, height=1080)
+    resolved = []
+
+    def source(j):
+        resolved.append(j)
+        return remote
+
+    seen = []
+
+    class Recording(RecordingClipper):
+        def __call__(self, video, clips, outputs, config, **kwargs):
+            seen.append(video)
+            super().__call__(video, clips, outputs, config)
+
+    config = PipelineConfig(caption=CaptionConfig(enabled=False))
+    ClipStage(clipper=Recording(), source=source).run(job, config)
+    assert len(resolved) == 1 and seen == [remote, remote]
+    ClipStage(clipper=Recording(), source=source).run(job, config)  # all up to date
+    assert len(resolved) == 1, "nothing to cut: the stream isn't resolved"
+
+
+class _RangeHandler(http.server.BaseHTTPRequestHandler):
+    """Serves files with HTTP Range support, as video CDNs do (ffmpeg seeks with it)."""
+
+    root: Path
+
+    def do_GET(self):
+        data = (self.root / self.path.lstrip("/")).read_bytes()
+        start, end = 0, len(data) - 1
+        if rng := self.headers.get("Range"):
+            a, _, b = rng.removeprefix("bytes=").partition("-")
+            start, end = int(a or 0), int(b) if b else len(data) - 1
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(data)}")
+        else:
+            self.send_response(200)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(end - start + 1))
+        self.end_headers()
+        self.wfile.write(data[start : end + 1])
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.mark.ffmpeg
+def test_cut_from_a_remote_http_video(make_video, tmp_path):
+    """Real ffmpeg reading the video over HTTP (local server) + a separate audio file."""
+    from echo.ffmpeg import ffmpeg
+
+    src = make_video(duration=6, size="320x180", name="remote.mp4")
+    audio = tmp_path / "input-audio.m4a"
+    ffmpeg(["-i", str(src), "-vn", "-c:a", "copy", str(audio)])
+    handler = type("Handler", (_RangeHandler,), {"root": tmp_path})
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/remote.mp4"
+        remote = RemoteVideo(url=url, audio=audio, width=320, height=180)
+        spec = ClipSpec.between("t", 1.3, 4.1)
+        out = tmp_path / "clips" / "01-t.mp4"
+        cut_clips(remote, [spec], [out], ClipConfig())
+    finally:
+        server.shutdown()
+    info = probe(out)
+    assert (info.width, info.height) == TARGET and info.has_audio
+    assert info.duration == pytest.approx(spec.duration, abs=0.1)

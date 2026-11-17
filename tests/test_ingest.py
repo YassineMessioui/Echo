@@ -114,3 +114,10 @@ def test_stage_passes_ingest_config(job_copy: Job):
 
     IngestStage(extractor=lambda *args: calls.append(args)).run(job_copy, config)
     assert calls == [(job_copy.input_video, job_copy.audio_path, config.ingest)]
+
+
+def test_link_job_ingests_the_downloaded_audio(job_copy: Job):
+    job_copy.input_audio.write_bytes(b"audio")  # a link job: no input.mp4
+    calls = []
+    IngestStage(extractor=lambda *args: calls.append(args)).run(job_copy, PipelineConfig())
+    assert calls[0][0] == job_copy.input_audio
