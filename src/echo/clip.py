@@ -25,22 +25,44 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
 from echo.captions import CaptionStyle, build_ass, chain_filters, subtitles_filter
 from echo.config import ClipConfig, PipelineConfig
+from echo.download import video_source
 from echo.errors import ArtifactError, ExternalToolError, InvalidInputError
-from echo.ffmpeg import ffmpeg, has_filter
-from echo.interfaces import Clipper
+from echo.ffmpeg import ffmpeg, has_filter, http_options
+from echo.interfaces import Clipper, RemoteVideo
 from echo.job import Job, _atomic_write
 from echo.models import ClipSpec, StageName
+from echo.reframe import video_filter as reframe_filter
 from echo.reframe import video_filter_for
+
+REMOTE_REQUEST_SIZE = 2**20
+"""Bytes per HTTP request when reading a ``RemoteVideo``."""
+
+_REMOTE_OPTIONS = {
+    # Ranged 1 MiB requests: YouTube throttles one long-running request to ~0.2 MB/s
+    # (a 60 s 1080p piece took 25 s; with this, 2.7 s). ffmpeg >= 9 only.
+    "request_size": str(REMOTE_REQUEST_SIZE),
+    "reconnect": "1",
+    "reconnect_on_network_error": "1",
+    "reconnect_delay_max": "5",
+}
+
+
+def _remote_input_options() -> list[str]:
+    """The ``_REMOTE_OPTIONS`` this ffmpeg supports (older builds lack some; without
+    ``request_size`` remote cuts still work, just slower)."""
+    supported = http_options()
+    return [arg for k, v in _REMOTE_OPTIONS.items() if k in supported for arg in (f"-{k}", v)]
 
 
 def build_ffmpeg_args(
-    video: Path,
+    video: Path | RemoteVideo,
     clip: ClipSpec,
     out: Path,
     config: ClipConfig,
@@ -51,9 +73,22 @@ def build_ffmpeg_args(
 
     ``video_filter`` is passed as ``-vf`` in the same encode (e.g. the 9:16 crop/scale
     graph from ``echo.reframe``); ``None`` keeps the source framing.
+
+    A ``RemoteVideo`` is read over HTTP: ffmpeg seeks with range requests, so only this
+    clip's bytes are fetched, and the audio comes from the local file. Both inputs are
+    seeked to the same start, so they stay in sync.
     """
-    args = ["-accurate_seek", "-ss", f"{clip.start:.3f}", "-i", str(video)]
-    args += ["-t", f"{clip.duration:.3f}", "-map", "0:v:0", "-map", "0:a:0?"]
+    start = f"{clip.start:.3f}"
+    if isinstance(video, RemoteVideo):
+        args = ["-headers", "".join(f"{k}: {v}\r\n" for k, v in video.headers.items())]
+        args += _remote_input_options()
+        args += ["-accurate_seek", "-ss", start, "-i", video.url]
+        args += ["-accurate_seek", "-ss", start, "-i", str(video.audio)]
+        audio_map = "1:a:0"
+    else:
+        args = ["-accurate_seek", "-ss", start, "-i", str(video)]
+        audio_map = "0:a:0?"
+    args += ["-t", f"{clip.duration:.3f}", "-map", "0:v:0", "-map", audio_map]
     if video_filter is not None:
         args += ["-vf", video_filter]
     # -crf / -preset are x264/x265 options; hardware encoders (e.g. h264_nvenc) need others.
@@ -65,7 +100,11 @@ def build_ffmpeg_args(
 
 
 def _cut_one(
-    video: Path, clip: ClipSpec, out: Path, config: ClipConfig, video_filter: str | None
+    video: Path | RemoteVideo,
+    clip: ClipSpec,
+    out: Path,
+    config: ClipConfig,
+    video_filter: str | None,
 ) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=out.parent, prefix=f".{out.name}.", suffix=".tmp")
@@ -80,7 +119,7 @@ def _cut_one(
 
 
 def cut_clips(
-    video: Path,
+    video: Path | RemoteVideo,
     clips: list[ClipSpec],
     outputs: list[Path],
     config: ClipConfig,
@@ -100,7 +139,10 @@ def cut_clips(
     """
     if len(clips) != len(outputs):
         raise ValueError(f"got {len(clips)} clips but {len(outputs)} output paths")
-    if not video.is_file():
+    if isinstance(video, RemoteVideo):
+        if not video.audio.is_file():
+            raise InvalidInputError(f"input audio not found: {video.audio}")
+    elif not video.is_file():
         raise InvalidInputError(f"input video not found: {video}")
     if extra_filter and "subtitles=" in extra_filter and not has_filter("subtitles"):
         raise ExternalToolError(
@@ -109,7 +151,10 @@ def cut_clips(
             "(--no-captions, or caption.enabled = false)."
         )
     if video_filter is None and clips:
-        video_filter = video_filter_for(video, config)
+        if isinstance(video, RemoteVideo):
+            video_filter = reframe_filter(video.width, video.height, config)
+        else:
+            video_filter = video_filter_for(video, config)
     video_filter = chain_filters(video_filter, extra_filter)
     for clip, out in zip(clips, outputs, strict=True):
         _cut_one(video, clip, out, config, video_filter)
@@ -161,6 +206,8 @@ class ClipStage:
 
     clipper: Clipper = cut_clips
     force: bool = False
+    source: Callable[[Job], Path | RemoteVideo] = video_source
+    """Local ``input.mp4``, or a link job's remote video (resolved only if a clip is cut)."""
 
     name: ClassVar[StageName] = StageName.CLIP
 
@@ -180,9 +227,18 @@ class ClipStage:
         return [*paths, job.clips_dir / ".stale"] if stale else paths
 
     def run(self, job: Job, config: PipelineConfig) -> None:
-        if not job.input_video.is_file():
+        if not (job.input_video.is_file() or job.input_audio.is_file()):
             raise ArtifactError(f"missing artifact: {job.input_video}")
         clips = job.read_clips()
+        resolved: list[Path | RemoteVideo] = []
+
+        def video() -> Path | RemoteVideo:
+            # Resolved once, on the first clip that needs cutting: a link job's stream
+            # URL is only fetched when there's work to do (and it expires anyway).
+            if not resolved:
+                resolved.append(self.source(job))
+            return resolved[0]
+
         paths = clip_paths(job, clips)
         job.clips_dir.mkdir(parents=True, exist_ok=True)
         manifest = {k: v for k, v in _read_manifest(job).items() if (job.clips_dir / k).exists()}
@@ -204,7 +260,7 @@ class ClipStage:
             ass_path = captions_path(path)
             if ass is None:
                 ass_path.unlink(missing_ok=True)
-                self.clipper(job.input_video, [clip], [path], config.clip)
+                self.clipper(video(), [clip], [path], config.clip)
             else:
                 # Burn from a temp file and move it into place only once the clip is cut,
                 # so a failed encode never leaves a .ass that doesn't match its .mp4.
@@ -212,7 +268,7 @@ class ClipStage:
                 tmp.write_bytes(ass.encode("utf-8-sig"))  # BOM: libass reads it anywhere
                 try:
                     self.clipper(
-                        job.input_video,
+                        video(),
                         [clip],
                         [path],
                         config.clip,

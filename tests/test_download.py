@@ -7,7 +7,7 @@ from yt_dlp.utils import DownloadError
 
 from echo import download
 from echo.download import VideoInfo, download_video, is_url, job_from_url, probe_url
-from echo.errors import InvalidInputError
+from echo.errors import ArtifactError, InvalidInputError
 from echo.job import Job
 
 URL = "https://youtu.be/abcDEF12345"
@@ -182,3 +182,68 @@ def test_live_download(tmp_path):
     job = job_from_url(tmp_path, url)
     info = probe(job.input_video)
     assert info.has_video and info.duration > 0
+
+
+# --- audio first / remote video (#75) ------------------------------------------------
+
+SEEKABLE = INFO | {
+    "requested_formats": [
+        {
+            "format_id": "137",
+            "vcodec": "avc1",
+            "protocol": "https",
+            "url": "https://video.example/137",
+            "width": 1920,
+            "height": 1080,
+            "http_headers": {"User-Agent": "UA"},
+        },
+        {"format_id": "140", "vcodec": "none", "protocol": "https", "url": "https://a"},
+    ]
+}
+DASH_ONLY = INFO | {"protocol": "http_dash_segments", "vcodec": "avc1"}
+
+
+def test_seekable_link_downloads_only_the_audio(tmp_path):
+    calls: list[tuple[str, str]] = []
+    params: list[dict] = []
+
+    def recording(p):
+        params.append(p)
+        return FakeYDL(p, info=SEEKABLE, calls=calls)
+
+    job = job_from_url(tmp_path, URL, ydl_factory=recording)
+    assert job.input_audio.is_file() and not job.input_video.exists()
+    assert params[-1]["format"] == download.AUDIO_FORMAT
+
+
+def test_unseekable_link_downloads_the_full_video(tmp_path):
+    job = job_from_url(tmp_path, URL, ydl_factory=factory(info=DASH_ONLY))
+    assert job.input_video.is_file() and not job.input_audio.exists()
+
+
+def test_resolve_video_returns_the_stream(tmp_path):
+    remote = download.resolve_video(URL, tmp_path / "a.m4a", ydl_factory=factory(info=SEEKABLE))
+    assert remote is not None
+    assert (remote.url, remote.width, remote.height) == ("https://video.example/137", 1920, 1080)
+    assert remote.headers == {"User-Agent": "UA"} and remote.audio == tmp_path / "a.m4a"
+    assert (
+        download.resolve_video(URL, tmp_path / "a.m4a", ydl_factory=factory(info=DASH_ONLY)) is None
+    )
+
+
+def test_video_source(tmp_path):
+    job = job_from_url(tmp_path, URL, ydl_factory=factory(info=SEEKABLE))
+    remote = download.video_source(job, ydl_factory=factory(info=SEEKABLE))
+    assert remote.url == "https://video.example/137" and remote.audio == job.input_audio
+
+    # The stream stopped being seekable since: fall back to a full download, once.
+    assert download.video_source(job, ydl_factory=factory(info=DASH_ONLY)) == job.input_video
+    assert job.input_video.is_file()
+    assert download.video_source(job, ydl_factory=factory(error=AssertionError)) == job.input_video
+
+
+def test_video_source_without_any_input(tmp_path):
+    job = Job(tmp_path / "j")
+    job.root.mkdir()
+    with pytest.raises(ArtifactError, match="input.mp4"):
+        download.video_source(job, ydl_factory=factory())
