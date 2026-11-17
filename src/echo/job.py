@@ -5,6 +5,7 @@ jobs/<job_id>/
   input-audio.m4a        # link jobs: only the audio is downloaded (#60); see RemoteVideo
   audio.wav              # stage: ingest
   transcript.json        # stage: transcribe
+  speakers.json          # stage: diarize (optional, #22)
   topics.json            # stage: llm
   clips.json             # stage: refine
   clips/<nn>-<slug>.mp4  # stage: clip
@@ -25,7 +26,7 @@ from pathlib import Path
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from echo.errors import ArtifactError, InvalidInputError
-from echo.models import ClipSpec, JobMeta, Topic, Transcript
+from echo.models import ClipSpec, JobMeta, Speakers, Topic, Transcript
 
 _TOPICS = TypeAdapter(list[Topic])
 _CLIPS = TypeAdapter(list[ClipSpec])
@@ -132,6 +133,10 @@ class Job:
         return self.root / "transcript.json"
 
     @property
+    def speakers_path(self) -> Path:
+        return self.root / "speakers.json"
+
+    @property
     def topics_path(self) -> Path:
         return self.root / "topics.json"
 
@@ -158,6 +163,12 @@ class Job:
 
     def write_transcript(self, transcript: Transcript) -> None:
         _atomic_write(self.transcript_path, transcript.model_dump_json(indent=2).encode())
+
+    def read_speakers(self) -> Speakers:
+        return self._read_model(self.speakers_path, Speakers)
+
+    def write_speakers(self, speakers: Speakers) -> None:
+        _atomic_write(self.speakers_path, speakers.model_dump_json(indent=2).encode())
 
     def read_topics(self) -> list[Topic]:
         return self._read_list(self.topics_path, _TOPICS)

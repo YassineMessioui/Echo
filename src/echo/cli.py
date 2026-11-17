@@ -13,7 +13,7 @@ import shutil
 import sys
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from enum import StrEnum
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -41,7 +41,8 @@ from echo.models import StageName, StageStatus
 from echo.pipeline import StageEvent, build_stages, run_pipeline
 
 _D = PipelineConfig()
-_STAGES = list(StageName)
+_STAGES = [name for name in StageName if name is not StageName.DIARIZE]
+"""Stage order for ``[n/N]`` when diarization (optional) isn't part of the run."""
 
 
 def _choices(name: str, field: str) -> type[StrEnum]:
@@ -224,8 +225,12 @@ def _describe(err: Any) -> str:
     return f"{loc}: {msg}" if loc else msg
 
 
-def _progress_line(event: StageEvent, total: int) -> str:
-    index = _STAGES.index(event.stage) + 1
+def _index(stage: StageName, order: Sequence[StageName]) -> int:
+    return order.index(stage) + 1 if stage in order else list(StageName).index(stage) + 1
+
+
+def _progress_line(event: StageEvent, total: int, order: Sequence[StageName] = _STAGES) -> str:
+    index = _index(event.stage, order)
     elapsed = f"{event.elapsed:.1f}s" if event.elapsed is not None else ""
     return f"[{index}/{total}] {event.stage.value:<11} {event.status.value:<9} {elapsed}".rstrip()
 
@@ -235,18 +240,27 @@ REDRAW_INTERVAL = 0.1
 """Seconds between redraws of the running line on a terminal (at most ~10 per second)."""
 
 
-def _running_line(event: StageEvent, total: int, elapsed: float) -> str:
+def _running_line(
+    event: StageEvent, total: int, elapsed: float, order: Sequence[StageName] = _STAGES
+) -> str:
     """``[2/5] transcribe   42%  12:30 / 58:10  31.0s`` for a RUNNING event with progress."""
-    index = _STAGES.index(event.stage) + 1
+    index = _index(event.stage, order)
     percent = f"{(event.progress or 0.0) * 100:.0f}%"
     detail = f"{event.detail}  " if event.detail else ""
     return f"[{index}/{total}] {event.stage.value:<11} {percent:>4}  {detail}{elapsed:.1f}s"
 
 
-def _tty_line(event: StageEvent, total: int, elapsed: float, width: int) -> str:
+def _tty_line(
+    event: StageEvent,
+    total: int,
+    elapsed: float,
+    width: int,
+    order: Sequence[StageName] = _STAGES,
+) -> str:
     """The running line redrawn in place: a carriage return, the line cut to the terminal width (a
     wrapped line can't be redrawn), then clear to the end of the line."""
-    return "\r" + _running_line(event, total, elapsed)[: max(width - 1, 1)] + CLEAR_LINE
+    line = _running_line(event, total, elapsed, order)
+    return "\r" + line[: max(width - 1, 1)] + CLEAR_LINE
 
 
 class _StageOutput:
@@ -262,12 +276,13 @@ class _StageOutput:
         self,
         *,
         tty: bool,
-        total: int = len(_STAGES),
+        order: Sequence[StageName] = tuple(_STAGES),
         clock: Callable[[], float] = time.monotonic,
         width: Callable[[], int] = lambda: shutil.get_terminal_size().columns,
     ) -> None:
         self._tty = tty
-        self._total = total
+        self._order = list(order)
+        self._total = len(self._order)
         self._clock = clock
         self._width = width
         self._started: dict[StageName, float] = {}
@@ -285,7 +300,7 @@ class _StageOutput:
         if self._drawn:
             typer.echo("\r" + CLEAR_LINE, nl=False, color=True)
             self._drawn = False
-        typer.echo(_progress_line(event, self._total))
+        typer.echo(_progress_line(event, self._total, self._order))
 
     def _show(self, event: StageEvent, elapsed: float, now: float) -> None:
         if self._tty:
@@ -293,7 +308,8 @@ class _StageOutput:
                 return
             self._last_draw = now
             # color=True: keep the clear-line code (only ever written to a terminal).
-            typer.echo(_tty_line(event, self._total, elapsed, self._width()), nl=False, color=True)
+            line = _tty_line(event, self._total, elapsed, self._width(), self._order)
+            typer.echo(line, nl=False, color=True)
             self._drawn = True
             return
         step = int((event.progress or 0.0) * 10)
@@ -423,7 +439,8 @@ def run(
     )
     _check_captions_supported(config)
 
-    on_event = _StageOutput(tty=_is_terminal() and not verbose)
+    stages = build_stages(config)
+    on_event = _StageOutput(tty=_is_terminal() and not verbose, order=[s.name for s in stages])
 
     try:
         if is_url(video):
@@ -434,7 +451,7 @@ def run(
             job = Job.create(config.jobs_dir, Path(video), job_id=job_id)
         run_pipeline(
             job,
-            build_stages(config),
+            stages,
             config,
             force=force,
             from_stage=from_stage,

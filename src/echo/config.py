@@ -143,6 +143,25 @@ class CaptionConfig(_Section):
     max_gap: float = Field(default=0.6, ge=0)
     """A pause longer than this (seconds) starts a new caption line."""
     uppercase: bool = True
+    speaker_colours: list[HexColour] = Field(
+        default_factory=lambda: ["#FFFFFF", "#7FDBFF", "#B8F2A6", "#FFB3D9"], min_length=1
+    )
+    """Caption colour per speaker (#68), in order of first appearance; reused cyclically.
+    Only applies when diarization (``DiarizeConfig.enabled``) found two or more speakers;
+    otherwise captions use ``colour``."""
+    speaker_tags: bool = False
+    """Prefix a caption line with its speaker's label when the speaker changes (#68)."""
+
+
+class DiarizeConfig(_Section):
+    """Speaker diarization (#22): who speaks when. Off by default: it adds ~5 min of CPU
+    per hour of audio."""
+
+    enabled: bool = False
+    num_speakers: int | None = Field(default=None, ge=1)
+    """None = estimate the number of speakers."""
+    threshold: float = Field(default=0.5, gt=0, lt=2)
+    """Clustering distance when estimating: lower splits into more speakers."""
 
 
 class PipelineConfig(_Section):
@@ -154,3 +173,4 @@ class PipelineConfig(_Section):
     refine: RefineConfig = RefineConfig()
     clip: ClipConfig = ClipConfig()
     caption: CaptionConfig = CaptionConfig()
+    diarize: DiarizeConfig = DiarizeConfig()

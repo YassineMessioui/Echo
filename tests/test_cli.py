@@ -4,6 +4,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -21,6 +22,10 @@ GOLDEN_CLIPS = Path(__file__).parent / "fixtures" / "golden" / "clips.json"
 runner = CliRunner(env={"COLUMNS": "200", "NO_COLOR": "1", "TERM": "dumb"})
 
 
+FAKE_STAGES = [SimpleNamespace(name=name) for name in StageName if name is not StageName.DIARIZE]
+"""What the fake ``build_stages`` returns: only ``name`` is read by the CLI."""
+
+
 @dataclass
 class FakePipeline:
     """Stands in for ``build_stages`` + ``run_pipeline`` and records what the CLI passed."""
@@ -33,7 +38,7 @@ class FakePipeline:
 
     def build_stages(self, config):
         self.stages_config = config
-        return ["fake-stages"]
+        return FAKE_STAGES
 
     def run_pipeline(self, job, stages, config, *, force=False, from_stage=None, on_event=None):
         self.calls.append(
@@ -146,7 +151,7 @@ def test_defaults_come_from_pipeline_config(fake, video, jobs_dir):
     assert result.exit_code == 0, result.output
     assert fake.config == PipelineConfig(jobs_dir=jobs_dir)
     assert fake.stages_config is fake.config
-    assert fake.calls[0]["stages"] == ["fake-stages"]
+    assert fake.calls[0]["stages"] is FAKE_STAGES
     assert fake.calls[0]["force"] is False
     assert fake.calls[0]["from"] is None
 

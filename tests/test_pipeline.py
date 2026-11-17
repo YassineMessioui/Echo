@@ -193,7 +193,7 @@ def test_echo_error_fails_the_stage_and_stops_the_run(job: Job) -> None:
     log: list[StageName] = []
     stages = fake_stages(log)
     cause = LLMError("ollama is not running")
-    stages[2] = FakeStage(StageName.LLM, log, error=cause)
+    stages[list(StageName).index(StageName.LLM)] = FakeStage(StageName.LLM, log, error=cause)
 
     with pytest.raises(PipelineError) as excinfo:
         run_pipeline(job, stages, CONFIG)
@@ -201,7 +201,7 @@ def test_echo_error_fails_the_stage_and_stops_the_run(job: Job) -> None:
     assert excinfo.value.stage == StageName.LLM
     assert excinfo.value.cause is cause
     assert isinstance(excinfo.value, EchoError)
-    assert log == [StageName.INGEST, StageName.TRANSCRIBE, StageName.LLM]
+    assert log == [StageName.INGEST, StageName.TRANSCRIBE, StageName.DIARIZE, StageName.LLM]
     meta = job.read_meta()
     record = meta.stages[StageName.LLM]
     assert record.status == StageStatus.FAILED
@@ -240,7 +240,9 @@ def test_ctrl_c_is_recorded_as_interrupted(job: Job) -> None:
 def test_rerun_after_failure_resumes_at_failed_stage(job: Job) -> None:
     log: list[StageName] = []
     stages = fake_stages(log)
-    stages[3] = FakeStage(StageName.REFINE, log, error=EchoError("bad clips"))
+    stages[list(StageName).index(StageName.REFINE)] = FakeStage(
+        StageName.REFINE, log, error=EchoError("bad clips")
+    )
     with pytest.raises(PipelineError):
         run_pipeline(job, stages, CONFIG)
 
@@ -250,6 +252,7 @@ def test_rerun_after_failure_resumes_at_failed_stage(job: Job) -> None:
     assert statuses(job) == {
         StageName.INGEST: StageStatus.SKIPPED,
         StageName.TRANSCRIBE: StageStatus.SKIPPED,
+        StageName.DIARIZE: StageStatus.SKIPPED,
         StageName.LLM: StageStatus.SKIPPED,
         StageName.REFINE: StageStatus.DONE,
         StageName.CLIP: StageStatus.DONE,
@@ -271,7 +274,8 @@ def test_build_stages_is_lazy(monkeypatch: pytest.MonkeyPatch, job: Job) -> None
 
     stages = build_stages(PipelineConfig(llm={"provider": "groq"}))  # no API key needed yet
 
-    assert [s.name for s in stages] == list(StageName)
+    # Diarization is optional and off by default, so it isn't built (#22).
+    assert [s.name for s in stages] == [n for n in StageName if n is not StageName.DIARIZE]
     assert [type(s) for s in stages] == [
         IngestStage,
         TranscribeStage,

@@ -310,3 +310,60 @@ def test_focus_range_rejects_inverted_same_unit_pairs(start, end):
     with pytest.raises(ValidationError, match="empty or inverted"):
         IngestConfig(start=start, end=end)
     IngestConfig(start="600", end="5%")  # mixed units: checked by ingest instead
+
+
+# --- diarization (#22, #68) -------------------------------------------------------------
+
+
+def test_old_job_json_without_diarize_stage_loads(golden_job: Job):
+    from echo.models import StageName
+
+    meta = golden_job.read_meta()  # written before the diarize stage existed
+    assert meta.stages[StageName.DIARIZE].status.value == "pending"
+
+
+def test_speakers_validation_and_lookup():
+    from echo.models import Speakers, SpeakerTurn
+
+    with pytest.raises(ValidationError):
+        SpeakerTurn(start=5, end=5, speaker="S1")
+    with pytest.raises(ValidationError):
+        Speakers(
+            turns=[
+                SpeakerTurn(start=5, end=9, speaker="S1"),
+                SpeakerTurn(start=0, end=4, speaker="S2"),
+            ]
+        )
+    speakers = Speakers(
+        turns=[
+            SpeakerTurn(start=0, end=10, speaker="S1"),
+            SpeakerTurn(start=10, end=20, speaker="S2"),
+            SpeakerTurn(start=25, end=30, speaker="S1"),
+        ]
+    )
+    assert speakers.labels == ["S1", "S2"]
+    assert speakers.speaker_at(8, 12) == "S1"  # 2 s vs 2 s: first wins
+    assert speakers.speaker_at(9, 15) == "S2"
+    assert speakers.speaker_at(21, 22) == "S2"  # in a gap: nearest turn
+    assert Speakers(turns=[]).speaker_at(0, 1) is None
+
+
+def test_speakers_round_trip(job_copy: Job):
+    from echo.models import Speakers, SpeakerTurn
+
+    speakers = Speakers(turns=[SpeakerTurn(start=0.5, end=3.0, speaker="S1")])
+    job_copy.write_speakers(speakers)
+    assert job_copy.read_speakers() == speakers
+
+
+def test_diarize_and_speaker_caption_config():
+    from echo.config import CaptionConfig, DiarizeConfig, PipelineConfig
+
+    assert PipelineConfig().diarize.enabled is False
+    with pytest.raises(ValidationError):
+        DiarizeConfig(num_speakers=0)
+    assert CaptionConfig().speaker_colours[0] == "#FFFFFF"
+    with pytest.raises(ValidationError):
+        CaptionConfig(speaker_colours=[])
+    with pytest.raises(ValidationError):
+        CaptionConfig(speaker_colours=["blue"])
