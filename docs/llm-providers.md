@@ -47,8 +47,11 @@ Set a number to override it, e.g. `chunk.max_tokens = 8000`.
 
 Trade-off: bigger windows mean fewer calls (less rate-limit pressure, often faster)
 and fewer topics cut at window edges. But very long windows can make a model,
-especially a small one, miss topics or return fewer, coarser ones. If a long video
-gets too few topics on a hosted model, try a smaller budget.
+especially a small one, miss topics or return fewer, coarser ones. Measured on a
+68-min talk with `gemini-flash-lite-latest` (#63): 3k windows gave 20 topics over
+the whole talk in 8 windows; one 24k window gave 6 to 8 topics, mostly from the
+first half, and some spans pointed at the wrong segments. If a long video gets too
+few topics, or misplaced ones, set a smaller budget (e.g. `3000` or `8000`).
 
 ## Local: Ollama
 
