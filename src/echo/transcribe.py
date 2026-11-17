@@ -275,10 +275,40 @@ class TranscribeStage:
     def outputs(self, job: Job) -> list[Path]:
         return [job.transcript_path]
 
+    def settings(self, config: PipelineConfig) -> str:
+        """Fingerprint of the settings the transcript depends on (#82), e.g.
+        ``"small|lang=auto|sequential|vad(min_silence=2000ms)"``.
+
+        The orchestrator re-transcribes when it differs from the one in ``job.json``.
+        It covers ``model_size``, ``language``, batched vs sequential and the ``vad_*``
+        fields. The batch *size* is left out: batched-8 and batched-16 give word-for-word
+        identical transcripts (#79 benchmarks), so it only changes speed.
+        ``device`` and ``compute_type`` are left out: they choose where, and at what
+        precision, the same model runs (the CUDA → CPU fallback changes both at run
+        time), so switching them keeps the transcript. An unset ``vad_min_silence_ms``
+        shows faster-whisper's default for the mode, so setting that same value
+        explicitly doesn't re-run; without VAD it's ignored.
+        """
+        t = config.transcribe
+        if t.vad_filter:
+            default_ms = 160 if t.batch_size else 2000
+            min_silence = default_ms if t.vad_min_silence_ms is None else t.vad_min_silence_ms
+            vad = f"vad(min_silence={min_silence}ms)"
+        else:
+            vad = "no-vad"
+        decode = "batched" if t.batch_size else "sequential"
+        return f"{t.model_size}|lang={t.language or 'auto'}|{decode}|{vad}"
+
+    @staticmethod
+    def _mode(t: TranscribeConfig) -> str:
+        return f"batched-{t.batch_size}" if t.batch_size else "sequential"
+
     def run(self, job: Job, config: PipelineConfig) -> None:
         if not job.audio_path.is_file():
             raise ArtifactError(f"missing artifact: {job.audio_path}")
         job.write_transcript(self.transcriber.transcribe(job.audio_path))
         meta = job.read_meta()
         meta.models["whisper"] = self.transcriber.model_name
+        t = config.transcribe
+        meta.models["whisper_mode"] = f"{self._mode(t)}, {'vad' if t.vad_filter else 'no vad'}"
         job.write_meta(meta)

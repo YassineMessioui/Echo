@@ -81,7 +81,12 @@ def build_ffmpeg_args(
     """
     start = f"{clip.start:.3f}"
     if isinstance(video, RemoteVideo):
-        args = ["-headers", "".join(f"{k}: {v}\r\n" for k, v in video.headers.items())]
+        # -headers puts them in ffmpeg's argv (visible in the process list). That's fine:
+        # echo.download never resolves a stream whose headers carry credentials
+        # (CREDENTIAL_HEADER), and echo.ffmpeg.run never logs argv (errors show stderr).
+        args = []
+        if video.headers:
+            args += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in video.headers.items())]
         args += _remote_input_options()
         args += ["-accurate_seek", "-ss", start, "-i", video.url]
         args += ["-accurate_seek", "-ss", start, "-i", str(video.audio)]

@@ -15,6 +15,7 @@ from echo.config import PipelineConfig, TranscribeConfig
 from echo.errors import ArtifactError, TranscriptionError
 from echo.job import Job
 from echo.models import Transcript
+from echo.pipeline import run_pipeline
 from echo.testing import FakeTranscriber
 from echo.transcribe import TranscribeStage, WhisperTranscriber, fixed_chunks, load_wav
 
@@ -232,6 +233,101 @@ def test_stage_requires_audio(job_copy: Job, golden_job: Job):
     stage = TranscribeStage(FakeTranscriber(golden_job.read_transcript()))
     with pytest.raises(ArtifactError, match="audio.wav"):
         stage.run(job_copy, PipelineConfig())
+
+
+# --- settings fingerprint: re-transcribe when the mode changes (#82) -----------------------
+
+
+def _config(**transcribe: Any) -> PipelineConfig:
+    return PipelineConfig(transcribe=transcribe)
+
+
+def test_settings_fingerprint_is_readable():
+    stage = TranscribeStage(FakeTranscriber(Transcript(language="en", duration=0, segments=[])))
+    assert stage.settings(_config()) == "small|lang=auto|sequential|vad(min_silence=2000ms)"
+    assert (
+        stage.settings(_config(model_size="tiny", language="fr", batch_size=8))
+        == "tiny|lang=fr|batched|vad(min_silence=160ms)"
+    )
+    assert (
+        stage.settings(_config(vad_filter=False, vad_min_silence_ms=500))
+        == "small|lang=auto|sequential|no-vad"
+    )
+
+
+@pytest.fixture
+def transcribed(job_copy: Job, golden_job: Job) -> tuple[Job, FakeTranscriber]:
+    """A job transcribed once with the default settings, and the transcriber's fake."""
+    job_copy.transcript_path.unlink()
+    job_copy.audio_path.write_bytes(b"")
+    fake = FakeTranscriber(golden_job.read_transcript())
+    run_pipeline(job_copy, [TranscribeStage(fake)], PipelineConfig())
+    assert len(fake.calls) == 1
+    return job_copy, fake
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"model_size": "tiny"},
+        {"language": "en"},
+        {"batch_size": 8},
+        {"vad_filter": False},
+        {"vad_min_silence_ms": 500},
+    ],
+)
+def test_changed_settings_re_transcribe(transcribed: tuple[Job, FakeTranscriber], change):
+    job, fake = transcribed
+    config = _config(**change)
+    run_pipeline(job, [TranscribeStage(fake)], config)
+    assert len(fake.calls) == 2
+    stage = TranscribeStage(fake)
+    assert job.read_meta().stages[stage.name].settings == stage.settings(config)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {},
+        {"device": "cpu"},
+        {"compute_type": "int8"},
+        {"vad_min_silence_ms": 2000},  # the sequential default, spelled out
+    ],
+)
+def test_unchanged_transcript_settings_skip(transcribed: tuple[Job, FakeTranscriber], change):
+    job, fake = transcribed
+    run_pipeline(job, [TranscribeStage(fake)], _config(**change))
+    assert len(fake.calls) == 1
+
+
+def test_old_job_without_settings_loads_and_is_not_re_transcribed(job_copy: Job, golden_job: Job):
+    assert job_copy.read_meta().stages[TranscribeStage.name].settings is None  # pre-#82 job
+    fake = FakeTranscriber(golden_job.read_transcript())
+    config = _config(batch_size=8)
+    stage = TranscribeStage(fake)
+    run_pipeline(job_copy, [stage], config)
+    assert fake.calls == []
+    meta = job_copy.read_meta()
+    assert meta.stages[stage.name].settings == stage.settings(config), "adopted"
+    assert meta.models["whisper"] == "faster-whisper/small"
+    assert "whisper_mode" not in meta.models
+
+
+@pytest.mark.parametrize(
+    ("change", "mode"),
+    [
+        ({}, "sequential, vad"),
+        ({"batch_size": 8}, "batched-8, vad"),
+        ({"vad_filter": False}, "sequential, no vad"),
+    ],
+)
+def test_stage_records_the_whisper_mode(job_copy: Job, golden_job: Job, change, mode):
+    _write_wav(job_copy.audio_path)
+    stage = TranscribeStage(FakeTranscriber(golden_job.read_transcript()))
+    stage.run(job_copy, _config(**change))
+    models = job_copy.read_meta().models
+    assert models["whisper_mode"] == mode
+    assert models["whisper"] == "fake/whisper"
 
 
 # --- batched pipeline + VAD (#58) ------------------------------------------------------
@@ -551,3 +647,12 @@ def test_progress_without_a_duration_still_ends_at_one(audio: Path):
     with progress.capture(lambda fraction, detail: reports.append((fraction, detail))):
         transcriber.transcribe(audio)
     assert reports == [(1.0, "0:00 / 0:00")]
+
+
+def test_batch_size_alone_does_not_re_transcribe(transcribed: tuple[Job, FakeTranscriber]):
+    job, fake = transcribed
+    run_pipeline(job, [TranscribeStage(fake)], _config(batch_size=8))
+    assert len(fake.calls) == 2  # sequential → batched: re-run
+    run_pipeline(job, [TranscribeStage(fake)], _config(batch_size=16))
+    assert len(fake.calls) == 2, "8 → 16 only changes speed"
+    assert job.read_meta().models["whisper_mode"] == "batched-8, vad"

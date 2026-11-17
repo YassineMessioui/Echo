@@ -624,6 +624,14 @@ def test_args_for_remote_video_read_only_the_clip_and_local_audio(tmp_path, monk
     assert args[args.index("-map") + 1 : args.index("-map") + 4] == ["0:v:0", "-map", "1:a:0"]
 
 
+def test_no_headers_option_without_headers(tmp_path, monkeypatch):
+    monkeypatch.setattr(clip_module, "http_options", lambda: frozenset())
+    remote = RemoteVideo(url="https://v", audio=tmp_path / "a.m4a", width=1920, height=1080)
+    args = build_ffmpeg_args(remote, ClipSpec.between("t", 1.0, 5.0), tmp_path / "o", ClipConfig())
+    assert "-headers" not in args and "" not in args
+    assert args[:4] == ["-accurate_seek", "-ss", "1.000", "-i"]
+
+
 def test_stage_resolves_the_source_once_and_only_when_cutting(job_copy):
     job = job_copy
     job.input_audio.write_bytes(b"audio")
