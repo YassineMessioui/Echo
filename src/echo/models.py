@@ -118,6 +118,56 @@ class Topic(_Artifact):
         return self
 
 
+# --- speakers.json (stage: diarize, #22) ------------------------------------------
+
+
+class SpeakerTurn(_Artifact):
+    """One stretch of speech by one speaker, in original-video time."""
+
+    start: float = Field(ge=0)
+    end: float = Field(ge=0)
+    speaker: str = Field(
+        min_length=1, description="Stable label, e.g. 'S1', in order of first appearance."
+    )
+
+    @model_validator(mode="after")
+    def _ordered(self) -> SpeakerTurn:
+        if self.end <= self.start:
+            raise ValueError(f"speaker turn end ({self.end}) <= start ({self.start})")
+        return self
+
+
+class Speakers(_Artifact):
+    turns: list[SpeakerTurn]
+
+    @model_validator(mode="after")
+    def _sorted(self) -> Speakers:
+        for prev, cur in zip(self.turns, self.turns[1:], strict=False):
+            if cur.start < prev.start:
+                raise ValueError("speaker turns must be sorted by start")
+        return self
+
+    @property
+    def labels(self) -> list[str]:
+        """Speakers in order of first appearance."""
+        return list(dict.fromkeys(turn.speaker for turn in self.turns))
+
+    def speaker_at(self, start: float, end: float) -> str | None:
+        """The speaker who talks most during ``[start, end]`` (a word or segment), or the
+        nearest turn's speaker if none overlaps; None without turns."""
+        if not self.turns:
+            return None
+        best, best_overlap = None, 0.0
+        for turn in self.turns:
+            overlap = min(end, turn.end) - max(start, turn.start)
+            if overlap > best_overlap:
+                best, best_overlap = turn.speaker, overlap
+        if best is not None:
+            return best
+        mid = (start + end) / 2
+        return min(self.turns, key=lambda t: min(abs(mid - t.start), abs(mid - t.end))).speaker
+
+
 # --- clips.json (stage: refine) -------------------------------------------------
 
 
@@ -150,6 +200,8 @@ class StageName(StrEnum):
 
     INGEST = "ingest"
     TRANSCRIBE = "transcribe"
+    DIARIZE = "diarize"
+    """Optional (#22): only part of a run when ``DiarizeConfig.enabled``."""
     LLM = "llm"
     REFINE = "refine"
     CLIP = "clip"
@@ -195,3 +247,10 @@ class JobMeta(BaseModel):
         default_factory=dict,
         description="Component -> model/version used, e.g. {'whisper': 'small', 'llm': '...'}",
     )
+
+    @model_validator(mode="after")
+    def _every_stage(self) -> JobMeta:
+        """job.json files written before a stage existed (e.g. ``diarize``) still load."""
+        for name in StageName:
+            self.stages.setdefault(name, StageRecord())
+        return self

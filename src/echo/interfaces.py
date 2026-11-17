@@ -23,7 +23,7 @@ from echo.config import (
     RefineConfig,
 )
 from echo.job import Job
-from echo.models import ClipSpec, StageName, Topic, Transcript, TranscriptWindow
+from echo.models import ClipSpec, SpeakerTurn, StageName, Topic, Transcript, TranscriptWindow
 
 # --- stage: ingest ----------------------------------------------------------------
 
@@ -47,6 +47,22 @@ class Transcriber(Protocol):
 
     def transcribe(self, audio: Path) -> Transcript:
         """Return segments with ids 0..n-1 and word-level timestamps.
+
+        Raises TranscriptionError.
+        """
+        ...
+
+
+# --- stage: diarize (optional, #22) --------------------------------------------------
+
+
+class Diarizer(Protocol):
+    model_name: str
+    """Recorded in job.json, e.g. 'sherpa-onnx/pyannote-3.0+titanet-small'."""
+
+    def diarize(self, audio: Path) -> list[SpeakerTurn]:
+        """Who speaks when in ``audio``, in seconds of the audio file, sorted by start.
+        Labels are stable within one call (the stage renames them S1, S2, ...).
 
         Raises TranscriptionError.
         """

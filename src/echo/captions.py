@@ -49,7 +49,7 @@ class CaptionStyle:
     @classmethod
     def from_config(cls, config: CaptionConfig) -> CaptionStyle:
         """The style for ``PipelineConfig.caption`` (``enabled`` is the caller's concern)."""
-        return cls(**config.model_dump(exclude={"enabled"}))
+        return cls(**config.model_dump(exclude={"enabled", "speaker_colours", "speaker_tags"}))
 
 
 @dataclass(frozen=True)
