@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from echo.config import LLMConfig, PipelineConfig, RefineConfig
+from echo.config import LLMConfig, PipelineConfig, RefineConfig, TranscribeConfig
 from echo.errors import ArtifactError, InvalidInputError, LLMError
 from echo.interfaces import LLMClient
 from echo.job import Job, slugify
@@ -256,6 +256,25 @@ def test_refine_max_clips_and_caption_font_defaults():
     with pytest.raises(ValidationError):
         RefineConfig(max_clips=0)
     assert CaptionConfig().font == "Montserrat ExtraBold"
+
+
+def test_link_job_paths_and_remote_video(tmp_path: Path):
+    from echo.interfaces import RemoteVideo
+
+    job = Job(tmp_path / "youtube-x")
+    assert job.input_audio == job.root / "input-audio.m4a"
+    remote = RemoteVideo(url="https://example/v", audio=job.input_audio, width=1920, height=1080)
+    assert remote.headers == {}
+
+
+def test_transcribe_batching_and_vad_defaults():
+    config = TranscribeConfig()
+    assert (config.batch_size, config.vad_filter, config.vad_min_silence_ms) == (0, True, None)
+    assert TranscribeConfig(batch_size=8).batch_size == 8  # batched pipeline
+    with pytest.raises(ValidationError):
+        TranscribeConfig(batch_size=-1)
+    with pytest.raises(ValidationError):
+        TranscribeConfig(vad_min_silence_ms=-1)
 
 
 def test_llm_max_concurrency_defaults_to_auto():
