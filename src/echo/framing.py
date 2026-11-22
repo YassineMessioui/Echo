@@ -90,6 +90,9 @@ class Shot:
     end: float
     people: tuple[Person, ...] = ()
     frames: int = 0
+    mouths: tuple[tuple[float, tuple[tuple[float, float], ...]], ...] = ()
+    """Per sampled frame: (time, ((face cx, mouth motion), ...)), for following the
+    speaker (``echo.follow``)."""
 
 
 def sample_size(width: int, height: int) -> tuple[int, int]:
@@ -224,8 +227,34 @@ def analyse(samples: Samples, duration: float, detector: FaceDetector) -> list[S
             or (start <= k / samples.fps < end and end - start < 0.3)
         ]
         people = group_people([detections[k] for k in idx])
-        result.append(Shot(start=start, end=end, people=people, frames=len(idx)))
+        mouths = tuple(
+            (
+                k / samples.fps,
+                tuple(
+                    (f.cx, mouth_motion(samples.frames[k - 1], samples.frames[k], f))
+                    for f in detections[k]
+                ),
+            )
+            for k in idx
+            if k > 0 and (k - 1) / samples.fps >= start
+        )
+        result.append(Shot(start=start, end=end, people=people, frames=len(idx), mouths=mouths))
     return result
+
+
+def mouth_motion(before: np.ndarray, frame: np.ndarray, face: Face) -> float:
+    """How much the mouth area of ``face`` changed since the previous sampled frame
+    (mean absolute difference, 0..1): high while someone talks."""
+    height, width = frame.shape[:2]
+    mx, my = face.mouth or (face.cx, face.cy + face.h / 4)
+    half_w, half_h = max(1, round(face.w * width * 0.3)), max(1, round(face.h * height * 0.12))
+    x0, x1 = max(0, round(mx * width) - half_w), min(width, round(mx * width) + half_w)
+    y0, y1 = max(0, round(my * height) - half_h), min(height, round(my * height) + half_h)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    a = before[y0:y1, x0:x1].astype(np.float32).mean(axis=2)
+    b = frame[y0:y1, x0:x1].astype(np.float32).mean(axis=2)
+    return float(np.abs(a - b).mean() / 255)
 
 
 def plan(shot_list: Sequence[Shot], window: float, default: float) -> list[tuple[float, float]]:
@@ -246,15 +275,23 @@ def plan(shot_list: Sequence[Shot], window: float, default: float) -> list[tuple
     return keyframes or [(0.0, default)]
 
 
-def crop_expression(keyframes: Sequence[tuple[float, float]], width: int, crop_w: int) -> str:
-    """ffmpeg ``crop`` x for these (time, window centre) keyframes on a ``width``-pixel
-    frame with a ``crop_w``-pixel window: a constant, or a sum of steps, e.g.
-    ``657+300*gte(t\\,4.200)``. Commas are escaped for a ``-vf`` filtergraph.
+def crop_expression(keyframes: Sequence[Sequence[float]], width: int, crop_w: int) -> str:
+    """ffmpeg ``crop`` x for these (time, window centre[, pan seconds]) keyframes on a
+    ``width``-pixel frame with a ``crop_w``-pixel window: a constant, or a sum of steps
+    and linear pans, e.g. ``657+300*gte(t\\,4.200)-300*clip((t-9.000)/0.400\\,0\\,1)``.
+    Commas are escaped for a ``-vf`` filtergraph.
     """
-    pixels = [(t, max(0, min(width - crop_w, round(x * width - crop_w / 2)))) for t, x in keyframes]
+    pixels = [
+        (k[0], min(width - crop_w, max(0, round(k[1] * width - crop_w / 2))), k[2] if k[2:] else 0)
+        for k in keyframes
+    ]
     expr = str(pixels[0][1])
-    for (_, before), (t, x) in zip(pixels, pixels[1:], strict=False):
-        if x != before:
+    for (_, before, _), (t, x, pan) in zip(pixels, pixels[1:], strict=False):
+        if x == before:
+            continue
+        if pan > 0:
+            expr += f"{x - before:+d}*clip((t-{t:.3f})/{pan:.3f}\\,0\\,1)"
+        else:
             expr += f"{x - before:+d}*gte(t\\,{t:.3f})"
     return expr
 
@@ -267,23 +304,32 @@ def frame_crop(
     crop_w: int,
     default_x: float,
     detector: FaceDetector,
+    turns: Sequence[tuple[float, float, str]] | None = None,
 ) -> str:
     """The ``crop`` x expression framing the faces of one clip, shot by shot.
 
     ``input_args`` are ffmpeg input arguments that seek to the clip start (local file or
     remote URL); ``width`` x ``height`` is the displayed frame size and ``crop_w`` the
-    window width in those pixels; ``default_x`` is ``ClipConfig.crop_x``.
+    window width in those pixels; ``default_x`` is ``ClipConfig.crop_x``. With
+    ``turns`` ((start, end, speaker) in seconds from the clip start), wide shots follow
+    the active speaker (``echo.follow``).
     """
     window = crop_w / width
     default = default_x * (1 - window) + window / 2  # crop_x -> window centre
     with tempfile.TemporaryDirectory(prefix="echo-framing-") as tmp:
         samples = sample(input_args, duration, width, height, Path(tmp))
     shot_list = analyse(samples, duration, detector)
-    keyframes = plan(shot_list, window, default)
+    keyframes: Sequence[Sequence[float]]
+    if turns:
+        from echo.follow import plan_speakers  # follow builds on this module
+
+        keyframes = plan_speakers(shot_list, turns, window, default)
+    else:
+        keyframes = plan(shot_list, window, default)
     log.debug(
         "framing: %d shots, %d with faces, x %s",
         len(shot_list),
         sum(1 for s in shot_list if main_people(s.people)),
-        [(round(t, 2), round(x, 3)) for t, x in keyframes],
+        [(round(k[0], 2), round(k[1], 3)) for k in keyframes],
     )
     return crop_expression(keyframes, width, crop_w)
