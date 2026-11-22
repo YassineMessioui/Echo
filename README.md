@@ -236,6 +236,7 @@ jobs/<job_id>/
 ├── transcript.json        # transcribe
 ├── speakers.json          # diarize (only with --speakers)
 ├── topics.json            # llm
+├── scores.json            # score: topics.json with an engagement score per topic
 ├── clips.json             # refine
 ├── clips/
 │   ├── 01-<slug>.mp4      # clip, one per entry in clips.json
@@ -279,6 +280,20 @@ The JSON files are the Pydantic models in [`echo.models`](src/echo/models.py); l
     "summary": "How even small sleep losses hurt focus and reaction time.",
     "start_segment": 4,
     "end_segment": 7
+  }
+]
+```
+
+**`scores.json`** (`list[Topic]`, #21): the topics of `topics.json`, same order and spans, with `score` set: each criterion 0–10, and `overall`, the weighted mean that `--max-clips` ranks by. `topics.json` itself has no `score`.
+
+```json
+[
+  {
+    "title": "Sleep and productivity",
+    "summary": "How even small sleep losses hurt focus and reaction time.",
+    "start_segment": 4,
+    "end_segment": 7,
+    "score": { "overall": 7.6, "hook": 8, "payoff": 8, "clarity": 8, "energy": 6, "reason": "Opens on a relatable claim and lands a concrete takeaway." }
   }
 ]
 ```

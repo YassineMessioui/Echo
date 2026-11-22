@@ -367,3 +367,46 @@ def test_diarize_and_speaker_caption_config():
         CaptionConfig(speaker_colours=[])
     with pytest.raises(ValidationError):
         CaptionConfig(speaker_colours=["blue"])
+
+
+# --- clip scores (#21) ------------------------------------------------------------------
+
+
+def test_old_topics_without_scores_still_load(golden_job: Job):
+    """topics.json from before #21 has no ``score``; it loads as None."""
+    assert all(topic.score is None for topic in golden_job.read_topics())
+
+
+def test_golden_scores_match_the_golden_topics(golden_job: Job):
+    scored = golden_job.read_scores()
+    topics = golden_job.read_topics()
+    assert [t.model_copy(update={"score": None}) for t in scored] == topics
+    assert all(t.score is not None and 0 <= t.score.overall <= 10 for t in scored)
+
+
+def test_score_criteria_are_between_0_and_10():
+    from echo.models import Score
+
+    ok = {"overall": 5, "hook": 5, "payoff": 5, "clarity": 5, "energy": 5}
+    assert Score(**ok).reason == ""
+    for name in ok:
+        with pytest.raises(ValidationError):
+            Score(**(ok | {name: 11}))
+        with pytest.raises(ValidationError):
+            Score(**(ok | {name: -1}))
+
+
+def test_scores_round_trip_and_topics_json_has_no_null_score(job_copy: Job):
+    scored = job_copy.read_scores()
+    job_copy.write_scores(scored)
+    assert job_copy.read_scores() == scored
+    job_copy.write_topics(job_copy.read_topics())
+    assert "score" not in job_copy.topics_path.read_text()
+
+
+def test_old_job_json_without_score_stage_loads(golden_job: Job):
+    assert golden_job.read_meta().stages[StageName.SCORE].status is StageStatus.PENDING
+
+
+def test_score_config_defaults_on():
+    assert PipelineConfig().score.enabled is True
