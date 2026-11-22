@@ -152,10 +152,10 @@ def cut_clips(
     ``video_filter`` to use a different ``-vf`` filter instead. ``extra_filter`` (e.g.
     burned-in captions) is chained after it, in the same encode.
 
-    With ``config.reframe`` ``"face"`` (or ``"speaker"``, which frames like ``"face"``
-    until #109), each clip is sampled first and the window follows the faces shot by
-    shot (``echo.framing``), using ``detector`` (YuNet by default). ``speakers`` is for
-    ``"speaker"`` (#109).
+    With ``config.reframe = "face"``, each clip is sampled first and the window follows
+    the faces shot by shot (``echo.framing``), using ``detector`` (YuNet by default).
+    ``"speaker"`` also follows the active speaker in wide shots, from ``speakers``
+    (``echo.follow``); without them it frames like ``"face"``.
 
     Raises ValueError if ``clips`` and ``outputs`` differ in length, InvalidInputError if
     ``video`` is missing or has no video stream and ExternalToolError if ffmpeg fails.
@@ -198,6 +198,7 @@ def cut_clips(
                 *window,
                 config.crop_x,
                 detector or default_detector(),
+                turns=clip_turns(speakers, clip) if config.reframe == "speaker" else None,
             )
             log.info("face framing took %.1f s: crop x = %s", time.monotonic() - started, x)
             width, height, sar = geometry
@@ -206,6 +207,17 @@ def cut_clips(
 
 
 _: Clipper = cut_clips
+
+
+def clip_turns(speakers: Speakers | None, clip: ClipSpec) -> list[tuple[float, float, str]]:
+    """The speaker turns overlapping ``clip``, in seconds from its start."""
+    if speakers is None:
+        return []
+    return [
+        (max(0.0, t.start - clip.start), min(clip.duration, t.end - clip.start), t.speaker)
+        for t in speakers.turns
+        if t.end > clip.start and t.start < clip.end
+    ]
 
 
 MANIFEST = "manifest.json"
@@ -230,11 +242,19 @@ def _config_data(config: ClipConfig) -> dict[str, object]:
     return data
 
 
-def _entry(clip: ClipSpec, config: ClipConfig, captions: str | None) -> dict[str, str]:
+def _entry(
+    clip: ClipSpec,
+    config: ClipConfig,
+    captions: str | None,
+    turns: list[tuple[float, float, str]] | None = None,
+) -> dict[str, str]:
     entry = {"clip": _clip_hash(clip), "config": _hash(_config_data(config))}
     if captions is not None:
         # The caption track's content: re-transcribing or restyling re-cuts the clip.
         entry["captions"] = _hash(captions)
+    if turns is not None:
+        # reframe = "speaker" follows these turns: re-diarizing re-cuts the clip.
+        entry["speakers"] = _hash([[round(a, 3), round(b, 3), s] for a, b, s in turns])
     return entry
 
 
@@ -255,7 +275,7 @@ class ClipStage:
     9:16 framing, in the same encode (#17).
 
     With diarization on (``--speakers``), each speaker's captions get their own colour
-    (#68).
+    (#68), and ``reframe = "speaker"`` follows the active speaker (#109).
 
     ``outputs()`` gets no config (``Stage`` protocol), so it only detects changed
     boundaries; ``settings()`` covers the rest (encode, framing, captions, speakers), so
@@ -319,15 +339,25 @@ class ClipStage:
             )
         transcript = job.read_transcript() if burn else None
         style = CaptionStyle.from_config(config.caption)
-        colour_speakers = burn and config.diarize.enabled and job.speakers_path.is_file()
-        speakers = job.read_speakers() if colour_speakers else None
+        diarized = config.diarize.enabled and job.speakers_path.is_file()
+        follow = config.clip.reframe == "speaker" and bool(clips)
+        if follow and not diarized:
+            log.warning(
+                "--reframe speaker needs diarization (--speakers); framing faces only instead"
+            )
+        follow = follow and diarized
+        all_speakers = job.read_speakers() if diarized and (burn or follow) else None
+        speakers = all_speakers if burn else None  # caption colours
 
         def clip_done(done: int) -> None:  # skipped (up-to-date) clips count as done
             progress.report(done / len(clips), f"clip {done}/{len(clips)}")
 
         for done, (clip, path) in enumerate(zip(clips, paths, strict=True), start=1):
             ass = build_ass(transcript, clip, style, speakers) if transcript is not None else None
-            entry = _entry(clip, config.clip, ass)
+            turns = clip_turns(all_speakers, clip) if follow else None
+            entry = _entry(clip, config.clip, ass, turns)
+            # Only "speaker" framing passes them, so clippers without the argument still work.
+            more = {"speakers": all_speakers} if follow else {}
             if not self.force and path.exists() and manifest.get(path.name) == entry:
                 clip_done(done)
                 continue
@@ -335,7 +365,7 @@ class ClipStage:
             ass_path = captions_path(path)
             if ass is None:
                 ass_path.unlink(missing_ok=True)
-                self.clipper(video(), [clip], [path], config.clip)
+                self.clipper(video(), [clip], [path], config.clip, **more)
             else:
                 # Burn from a temp file and move it into place only once the clip is cut,
                 # so a failed encode never leaves a .ass that doesn't match its .mp4.
@@ -348,6 +378,7 @@ class ClipStage:
                         [path],
                         config.clip,
                         extra_filter=subtitles_filter(tmp),
+                        **more,
                     )
                     os.replace(tmp, ass_path)
                 except BaseException:

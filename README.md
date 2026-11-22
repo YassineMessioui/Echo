@@ -95,7 +95,7 @@ flowchart LR
 | Transcription    | faster-whisper (local), word-level timestamps, optional batching + VAD |
 | Speakers         | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx): pyannote segmentation 3.0 + NeMo TitaNet-small, offline on CPU (no Hugging Face token, no PyTorch) |
 | Moment selection | An LLM behind a swappable `LLMClient`: local through [Ollama](https://ollama.com) or hosted through any OpenAI-compatible API (Groq, Gemini, OpenRouter, Mistral, OpenAI). It returns segment IDs, never timestamps |
-| Reframing        | Centre crop to 9:16 by default (position set by `--crop-x`; near-square sources are padded). `--reframe face` puts the window on the faces of each shot: [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) (MIT, 230 KB) on onnxruntime, camera cuts detected. Speaker following next (#109) |
+| Reframing        | Centre crop to 9:16 by default (position set by `--crop-x`; near-square sources are padded). `--reframe face` puts the window on the faces of each shot: [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) (MIT, 230 KB) on onnxruntime, camera cuts detected. `--reframe speaker` (with `--speakers`) follows whoever talks in wide shots (#109) |
 | Captions         | ASS subtitles burned in with FFmpeg + libass, bundled Montserrat ExtraBold, colour per speaker |
 | Queue / jobs     | Synchronous for now; Celery/RQ + Redis later (#20) |
 | Storage          | Local disk first; S3-compatible later (needed for IG/FB, which pull video from a URL) |
@@ -128,6 +128,7 @@ Echo/
 │   ├── refine.py        # topics → clips.json, 15–60 s (#10, #62)
 │   ├── clip.py, reframe.py  # clips/<nn>-<slug>.mp4, 9:16 (#11, #26)
 │   ├── framing.py, faces.py # face-centred crop per shot (#16, #108)
+│   ├── follow.py        # follow the active speaker in wide shots (#109)
 │   ├── captions.py      # word-highlighted, per-speaker captions (#17, #68)
 │   ├── fonts/           # Montserrat ExtraBold (SIL OFL)
 │   └── testing.py       # fakes for tests (FakeLLMClient, FakeTranscriber)
