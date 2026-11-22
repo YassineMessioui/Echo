@@ -54,6 +54,8 @@ def _choices(name: str, field: str) -> type[StrEnum]:
 
 Aspect = _choices("Aspect", "aspect")
 Background = _choices("Background", "background")
+Reframe = _choices("Reframe", "reframe")
+_DEFAULT_REFRAME = Reframe(_D.clip.reframe)
 _DEFAULT_ASPECT = Aspect(_D.clip.aspect)
 _DEFAULT_BACKGROUND = Background(_D.clip.background)
 
@@ -411,6 +413,13 @@ def run(
     crop_x: Annotated[
         float, typer.Option(help="Horizontal crop position for 9:16 (0 = left, 1 = right).")
     ] = _D.clip.crop_x,
+    reframe: Annotated[
+        Reframe,
+        typer.Option(
+            help="Where the 9:16 window goes: fixed at --crop-x (centre), on the faces of "
+            "each shot (face), or also following the speaker (speaker, with --speakers)."
+        ),
+    ] = _DEFAULT_REFRAME,
     background: Annotated[
         Background, typer.Option(help="Fill for sources narrower than 9:16.")
     ] = _DEFAULT_BACKGROUND,
@@ -451,7 +460,12 @@ def run(
             "max_duration": max_duration,
             "max_clips": max_clips,
         },
-        clip={"aspect": aspect.value, "crop_x": crop_x, "background": background.value},
+        clip={
+            "aspect": aspect.value,
+            "crop_x": crop_x,
+            "reframe": reframe.value,
+            "background": background.value,
+        },
         caption={"enabled": captions},
         diarize={"enabled": speakers, "num_speakers": num_speakers},
     )
