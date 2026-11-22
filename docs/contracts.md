@@ -26,7 +26,7 @@ flowchart LR
 | #9 | llm | `echo/llm/merge.py` | `TopicMerger` | `list[list[Topic]]` | `list[Topic]` → `topics.json` |
 | #22 | diarize (optional) | `echo/diarize.py` | `Diarizer` | `audio.wav`, `transcript.json` (offset) | `Speakers` → `speakers.json` |
 | #10 | refine | `echo/refine.py` | `BoundaryRefiner` | `Transcript`, `list[Topic]` | `list[ClipSpec]` → `clips.json` |
-| #11 | clip | `echo/clip.py` | `Clipper` | `input.mp4` (or a `RemoteVideo` for links), `list[ClipSpec]` | `clips/<nn>-<slug>.mp4` |
+| #11 | clip | `echo/clip.py` | `Clipper` | `input.mp4` (or a `RemoteVideo` for links), `list[ClipSpec]`, optional `Speakers` (#16) | `clips/<nn>-<slug>.mp4` |
 | #12 | orchestration | `echo/pipeline.py` | `Stage` adapters + runner | `Job` | `job.json` |
 | #13 | orchestration | `echo/cli.py` | Typer CLI | args | job directory |
 
