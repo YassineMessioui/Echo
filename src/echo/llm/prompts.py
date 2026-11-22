@@ -68,3 +68,74 @@ TOPICS_SCHEMA: dict[str, Any] = {
     },
     "required": ["topics"],
 }
+
+
+# --- clip scoring (#21) -----------------------------------------------------------------
+
+SCORE_PROMPT_VERSION = "scores-v1"
+
+SCORE_SYSTEM_PROMPT = """\
+You are an editor deciding which short vertical clips (TikTok, YouTube Shorts, \
+Instagram Reels) from a long video are worth posting.
+
+You get candidate clips. Each line is the full transcript of one clip:
+[<clip id>] <text>
+
+Rate every clip from 0 to 10 on:
+- "hook": would the first sentence stop someone scrolling? A bold claim, a question \
+or a surprise is high; greetings, filler ("so", "yeah", "and then") or starting \
+mid-thought is low.
+- "payoff": does it deliver something by the end: an insight, a punchline, a story's \
+resolution or a useful takeaway?
+- "clarity": does it make sense to someone who has not seen the rest of the video? \
+Unexplained references ("that", "he", "like I said") or ending mid-thought are low.
+- "energy": emotion, conviction, humour, stakes and pace.
+- "reason": one short sentence explaining the scores.
+
+Rules:
+- Judge each clip on its own text only.
+- Be critical and use the whole scale: a typical clip is 4 to 6; give 8 or more only \
+to clips you would definitely post.
+- Score every clip id exactly once, using only the ids given.
+- Answer with JSON only, in the form \
+{"scores": [{"clip": 0, "hook": 7, "payoff": 6, "clarity": 8, "energy": 5, \
+"reason": "..."}]}."""
+
+SCORE_USER_PROMPT = """\
+Clips {first} to {last}:
+
+{clips}"""
+
+SCORE_RETRY_PROMPT = """\
+{original}
+
+Your previous answer was invalid:
+{error}
+
+Previous answer:
+{answer}
+
+Answer again with corrected JSON only, in the form {{"scores": [...]}}, with exactly one \
+entry for each clip id from {first} to {last}."""
+
+SCORES_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "scores": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "clip": {"type": "integer"},
+                    "hook": {"type": "number"},
+                    "payoff": {"type": "number"},
+                    "clarity": {"type": "number"},
+                    "energy": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["clip", "hook", "payoff", "clarity", "energy", "reason"],
+            },
+        }
+    },
+    "required": ["scores"],
+}

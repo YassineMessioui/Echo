@@ -12,7 +12,8 @@ from echo.errors import EchoError, LLMError
 from echo.ingest import IngestStage
 from echo.job import Job
 from echo.llm.merge import LLMStage
-from echo.llm.prompts import PROMPT_VERSION
+from echo.llm.prompts import PROMPT_VERSION, SCORE_PROMPT_VERSION
+from echo.llm.scoring import ScoreStage
 from echo.models import StageName, StageStatus
 from echo.pipeline import PipelineError, StageEvent, build_stages, run_pipeline
 from echo.refine import RefineStage
@@ -275,14 +276,17 @@ def test_build_stages_is_lazy(monkeypatch: pytest.MonkeyPatch, job: Job) -> None
 
     stages = build_stages(PipelineConfig(llm={"provider": "groq"}))  # no API key needed yet
 
-    # Diarization is optional and off by default, so it isn't built (#22); the score
-    # stage (#21) isn't built yet.
-    optional = (StageName.DIARIZE, StageName.SCORE)
-    assert [s.name for s in stages] == [n for n in StageName if n not in optional]
+    # Diarization is optional and off by default, so it isn't built (#22); scoring (#21)
+    # is on by default.
+    assert [s.name for s in stages] == [n for n in StageName if n is not StageName.DIARIZE]
+    assert StageName.SCORE not in [
+        s.name for s in build_stages(PipelineConfig(score={"enabled": False}))
+    ]
     assert [type(s) for s in stages] == [
         IngestStage,
         TranscribeStage,
         LLMStage,
+        ScoreStage,
         RefineStage,
         ClipStage,
     ]
@@ -305,18 +309,21 @@ def test_build_stages_creates_resources_when_run(
     client = FakeLLMClient(['{"topics": []}'] * 100)
     monkeypatch.setattr(pipeline, "WhisperTranscriber", lambda config: FakeTranscriber(transcript))
     monkeypatch.setattr(pipeline, "make_llm_client", lambda config: client)
-    _, transcribe, llm, _, _ = build_stages(CONFIG)
+    _, transcribe, llm, score, _, _ = build_stages(CONFIG)
 
     job_copy.audio_path.write_bytes(b"")
     transcribe.run(job_copy, CONFIG)
     llm.run(job_copy, CONFIG)
+    score.run(job_copy, CONFIG)
 
     assert client.calls
     assert job_copy.read_topics() == []
+    assert job_copy.read_scores() == []
     models = job_copy.read_meta().models
     assert models["whisper"] == "fake/whisper"
     assert models["llm"] == "fake/llm"
     assert models["llm_prompt"] == PROMPT_VERSION
+    assert models["score_prompt"] == SCORE_PROMPT_VERSION
 
 
 def test_a_stage_that_reruns_forces_later_stages(job: Job) -> None:
