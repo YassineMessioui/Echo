@@ -79,7 +79,7 @@ flowchart LR
 - Measured and closed: cutting clips in parallel (#57); ffmpeg already keeps the cores busy
 
 **Next**
-- [ ] Clip scoring: keep only the most engaging moments (#21)
+- [x] Clip scoring: `--max-clips` keeps the most engaging moments (#21)
 - [ ] Smart reframing that follows the speaker (#16)
 - [ ] Publishing to YouTube Shorts, TikTok, Instagram Reels and Facebook Reels, with titles, hashtags, a review step and scheduling (epic #67)
 - [ ] Web UI, job queue, S3 storage (#19, #20, #23)
@@ -206,7 +206,7 @@ The CLI is called `echo-clips` because `echo` clashes with the shell builtin:
 uv run echo-clips run episode.mp4                          # → jobs/<job_id>/clips/*.mp4
 uv run echo-clips run "https://youtu.be/VIDEO_ID" --llm-provider gemini   # a link
 uv run echo-clips run "https://youtu.be/VIDEO_ID" --llm-provider gemini --speakers  # colour per speaker
-uv run echo-clips run episode.mp4 --max-clips 5            # keep at most 5 clips
+uv run echo-clips run episode.mp4 --max-clips 5            # keep the 5 best-scored clips
 uv run echo-clips run episode.mp4 --range 10%:90%          # skip intro and outro
 uv run echo-clips run episode.mp4 --job-id ep42            # name the job; re-run to resume it
 uv run echo-clips run episode.mp4 --job-id ep42 --from-stage refine --max-duration 45
@@ -221,6 +221,7 @@ Put quotes around links: they contain `?` and `&`, which the shell would otherwi
 - **Clips** are **9:16 at 1080×1920** by default. `--aspect source` keeps the source framing; `--crop-x` moves the crop window (0 = left, 1 = right).
 - **`--speakers`** detects who speaks when (about 5 min of CPU per hour of audio, so it's off by default) and gives each speaker's captions their own colour. `--num-speakers N` fixes the count.
 - **`--range`** only processes part of the video; clips keep original-video times. It's opt-in: in our tests about a third of the best clips sat outside 15–85 %.
+- **Scoring** (on by default, `--no-score` to skip): the clips are listed best first with a score and a reason, and `--max-clips N` keeps the N best.
 - **Re-running a job** skips the stages that are done; changed settings re-run what they affect. `--force` redoes every stage; `--from-stage <name>` redoes that stage and everything after it.
 - **Progress:** long stages show a live line (`[2/5] transcribe   42%  12:30 / 58:10`); Ctrl+C stops at once.
 - Every option and its default: [docs/cli.md](docs/cli.md).
@@ -393,7 +394,7 @@ publish:
 - Who owns the source videos? We need a rights and permissions policy before posting content we didn't create.
 - Is this a CLI tool for ourselves, or a SaaS with user accounts?
 - Which LLM gives the best topic boundaries? So far: Groq's `openai/gpt-oss-120b` found exactly the right three topics on a 2-minute test podcast, and Gemini's free `gemini-flash-lite-latest` works on hour-long episodes (its free tier is often overloaded; Echo retries). Still to compare on more real episodes, and locally with Ollama.
-- How many clips should an episode give? A 68-min podcast gave 21; clip scoring (#21) should pick the best few.
+- How many clips should an episode give? A 68-min podcast gave 21; with clip scoring (#21), `--max-clips 5` keeps the best five. Is the LLM's taste good enough to post without a review?
 
 ## License
 
