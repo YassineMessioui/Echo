@@ -308,6 +308,8 @@ class YouTubePublisher:
         self._http = http
         self._chunk_size = chunk_size
         self._access_token: str | None = None
+        self.channel: str | None = None
+        """Title of the channel the last upload went to (from YouTube's answer)."""
 
     def _get_http(self) -> httpx.Client:
         if self._http is None:
@@ -367,7 +369,11 @@ class YouTubePublisher:
             return PublishResult(error=f"upload failed: {e}")
         if done.is_error:
             return self._failed(done)
-        video_id = _json(done).get("id")
+        answer = _json(done)
+        video_id = answer.get("id")
+        snippet = answer.get("snippet")
+        if isinstance(snippet, dict) and snippet.get("channelTitle"):
+            self.channel = str(snippet["channelTitle"])
         if not video_id:
             return PublishResult(error="YouTube accepted the upload but returned no video id")
         return PublishResult(

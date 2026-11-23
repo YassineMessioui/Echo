@@ -158,6 +158,13 @@ def test_uploads_in_chunks_and_resumes(video: Path):
     assert ranges == ["bytes 0-399/1000", "bytes 400-799/1000"][: len(ranges)]
 
 
+def test_remembers_the_channel_it_posted_to(video: Path):
+    signed_in()
+    google = FakeGoogle(upload_body={"id": "v9", "snippet": {"channelTitle": "EchoClips"}})
+    p = publisher(google)
+    assert p.publish(video, post(), PublishConfig()).ok and p.channel == "EchoClips"
+
+
 def test_the_access_token_is_fetched_once(video: Path):
     signed_in()
     google = FakeGoogle()

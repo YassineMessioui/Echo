@@ -835,7 +835,9 @@ def publish(
 
     def show(post: Any, result: Any) -> None:
         if result.ok:
-            typer.echo(f"  posted {post.clip} ({result.privacy}): {result.url}")
+            channel = getattr(publisher, "channel", None)
+            where = f" on {channel}" if channel else ""
+            typer.echo(f"  posted {post.clip}{where} ({result.privacy}): {result.url}")
         else:
             typer.echo(f"  failed {post.clip}: {result.error}", err=True)
 
