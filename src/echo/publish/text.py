@@ -16,10 +16,11 @@ import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from echo.config import ChunkConfig, LLMConfig
-from echo.errors import TopicExtractionError
+from echo.errors import ArtifactError, TopicExtractionError
 from echo.interfaces import LLMClient
 from echo.job import Job
 from echo.llm.chunking import approx_tokens, resolve_max_tokens
@@ -187,12 +188,15 @@ class LLMPostWriter:
             hashtags_max=HASHTAGS[1],
         )
 
-    def write(self, clips: Sequence[ClipText]) -> list[PostDraft]:
+    def write(self, clips: Sequence[ClipText], source: str = "") -> list[PostDraft]:
+        """Text for ``clips``. ``source`` names the video they come from (e.g. its title
+        and channel), so the text can say what it is (the game, show or creator)."""
         if not clips:
             return []
         last = len(clips) - 1
         lines = "\n\n".join(_format(i, c) for i, c in enumerate(clips))
-        original = prompts.USER_PROMPT.format(first=0, last=last, clips=lines)
+        intro = f"Source video: {source}\n\n" if source else ""
+        original = prompts.USER_PROMPT.format(source=intro, first=0, last=last, clips=lines)
         prompt = original
         attempts = self.config.max_retries + 1
         for _ in range(attempts):
@@ -230,6 +234,22 @@ def batches(clips: Sequence[ClipText], budget: int) -> list[range]:
     if start < len(clips):
         result.append(range(start, len(clips)))
     return result
+
+
+def source_of(job: Job) -> str:
+    """What the job's video is, for the LLM: a link's title and channel, else the file
+    name. Empty if unknown."""
+    try:
+        meta = job.read_meta()
+    except ArtifactError:
+        return ""
+    info = meta.source_info
+    title = str(info.get("title") or "").strip()
+    uploader = str(info.get("uploader") or "").strip()
+    if title:
+        return f'"{title}" by {uploader}' if uploader else f'"{title}"'
+    name = Path(meta.source).stem if meta.source else ""
+    return f'a video file named "{name}"' if name else ""
 
 
 @dataclass(frozen=True)
@@ -277,7 +297,7 @@ def update_posts(
         ]
         drafts: list[PostDraft] = []
         for group in batches(texts, resolve_max_tokens(chunk, writer.config)):
-            drafts += writer.write([texts[k] for k in group])
+            drafts += writer.write([texts[k] for k in group], source_of(job))
         for i, draft in zip(todo, drafts, strict=True):
             text = {
                 "title": draft.title,

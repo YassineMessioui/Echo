@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-POSTS_PROMPT_VERSION = "posts-v1"
+POSTS_PROMPT_VERSION = "posts-v2"
 
 SYSTEM_PROMPT = """\
 You write the text that goes with short vertical clips (YouTube Shorts, TikTok, \
@@ -29,12 +29,15 @@ and without spaces (e.g. "sleep", "productivitytips").
 
 Rules:
 - Write in the language the clip is spoken in.
+- The source video (its title and channel), when given, tells you what the clips are \
+from, e.g. the game, show or creator. Use it in titles and hashtags (e.g. the game's \
+name), but describe only what the clip itself shows.
 - Base everything on the clip's own words. Never invent facts, names or numbers.
 - Answer with JSON only, in the form {{"posts": [{{"clip": <number>, "title": ..., \
 "description": ..., "hashtags": [...]}}, ...]}}, with one entry for every clip."""
 
 USER_PROMPT = """\
-Clips {first} to {last}:
+{source}Clips {first} to {last}:
 
 {clips}"""
 
