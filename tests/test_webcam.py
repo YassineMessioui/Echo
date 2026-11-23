@@ -18,7 +18,10 @@ from echo.webcam import (
     MARGIN,
     TOP,
     Box,
+    ClipWebcam,
     ExcludingDetector,
+    analyse,
+    consolidate,
     find_webcam,
     overlay_filter,
     webcam_box,
@@ -92,14 +95,34 @@ def test_a_typical_shape_where_no_edge_is_found():
     assert box.h == pytest.approx(box.w * W / H * 3 / 4, rel=0.05)
 
 
-def test_a_known_webcam_is_reused_on_a_calm_clip():
-    """Once a stream's webcam is known, a calm clip (a menu) with the same still face keeps it."""
-    known = Box(0.02, 0.4, 0.2, 0.25)
-    calm = stream_frames(still=True)
-    assert find_webcam(calm, Faces(lambda k: [webcam_face()])) is None
-    assert find_webcam(calm, Faces(lambda k: [webcam_face()]), known) == known
+def test_consolidate_uses_the_median_webcam_for_every_clip_with_the_face_in_it():
+    """A stream's webcam doesn't move: one clip's too-tight box (the streamer moved a
+    lot) and a calm clip (a menu: face found, box not confirmed) both get the median."""
+    face = webcam_face()
+    good = Box(0.03, 0.42, 0.17, 0.22)
+    tight = Box(0.06, 0.47, 0.09, 0.11)
+    good2 = Box(0.035, 0.43, 0.165, 0.21)
     elsewhere = Face(cx=0.8, cy=0.2, w=0.05, h=0.08)
-    assert find_webcam(calm, Faces(lambda k: [elsewhere]), known) is None
+    clips = [
+        ClipWebcam(face, tight),
+        ClipWebcam(face, good),
+        ClipWebcam(face, good2),
+        ClipWebcam(face, None),  # calm clip
+        ClipWebcam(elsewhere, None),  # a different still face: no webcam
+        ClipWebcam(),  # no face at all
+    ]
+    boxes = consolidate(clips)
+    median = good2  # by area: tight < good2 < good
+    assert boxes == [median, median, median, median, None, None]
+
+
+def test_consolidate_without_any_webcam():
+    assert consolidate([ClipWebcam(), ClipWebcam(webcam_face(), None)]) == [None, None]
+
+
+def test_analyse_reports_the_face_even_on_a_calm_clip():
+    result = analyse(stream_frames(still=True), Faces(lambda k: [webcam_face()]))
+    assert result.face is not None and result.box is None
 
 
 def test_a_moving_game_character_is_not_a_webcam():

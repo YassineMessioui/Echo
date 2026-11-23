@@ -203,42 +203,65 @@ def _background_change(frames: Sequence[np.ndarray], box: Box) -> float:
     return float(np.abs(np.diff(grey, axis=0))[:, outside].mean())
 
 
-def find_webcam(
-    frames: Sequence[np.ndarray], detector: FaceDetector, known: Box | None = None
-) -> Box | None:
-    """The webcam overlay in these samples of one clip, or None.
+@dataclass(frozen=True)
+class ClipWebcam:
+    """What one clip's samples show: its still face (if any) and, when the picture around
+    it moves, the webcam box around that face."""
 
-    ``known`` is a webcam already found in another clip of the same video: a still face
-    inside it confirms it, even when this clip's picture is calm.
-    """
+    face: Face | None = None
+    box: Box | None = None
+
+
+def analyse(frames: Sequence[np.ndarray], detector: FaceDetector) -> ClipWebcam:
+    """The still face and webcam box in these samples of one clip."""
     if len(frames) < MIN_FRAMES:
-        return None
+        return ClipWebcam()
     face = still_face([detector.detect(f) for f in frames])
     if face is None:
-        return None
-    if known is not None and known.contains(face.cx, face.cy):
-        return known
+        return ClipWebcam()
     box = webcam_box(face, frames)
     if _background_change(frames, box) < MIN_BACKGROUND_CHANGE:
-        return None
-    return box
+        return ClipWebcam(face=face)
+    return ClipWebcam(face=face, box=box)
 
 
-def detect_webcam(
+def find_webcam(frames: Sequence[np.ndarray], detector: FaceDetector) -> Box | None:
+    """The webcam overlay in these samples of one clip, or None."""
+    return analyse(frames, detector).box
+
+
+def consolidate(clips: Sequence[ClipWebcam]) -> list[Box | None]:
+    """One webcam per clip, consistent across the video: a stream's webcam doesn't move,
+    so the median of the boxes found is used for every clip whose still face is inside
+    it. That fixes a clip where the streamer moved a lot (a box too tight) and a calm
+    clip (a menu) where the picture didn't move enough to confirm the webcam on its own.
+    A clip whose still face is elsewhere keeps its own box (or none)."""
+    found = sorted((c.box for c in clips if c.box is not None), key=lambda b: b.w * b.h)
+    if not found:
+        return [None] * len(clips)
+    median = found[len(found) // 2]
+    return [
+        median if c.face is not None and median.contains(c.face.cx, c.face.cy) else c.box
+        for c in clips
+    ]
+
+
+def detect_webcams(
     input_at: InputAt,
-    start: float,
-    duration: float,
+    spans: Sequence[tuple[float, float]],
     width: int,
     height: int,
     detector: FaceDetector,
-    known: Box | None = None,
-) -> Box | None:
-    """Sample one clip and find its webcam overlay (``find_webcam``)."""
-    with tempfile.TemporaryDirectory(prefix="echo-webcam-") as tmp:
-        frames = sample_frames(input_at, start, duration, width, height, Path(tmp))
-    box = find_webcam(frames, detector, known)
-    log.info("webcam: %s (%d samples)", box, len(frames))
-    return box
+) -> list[Box | None]:
+    """The webcam of each clip (``(start, duration)`` spans of one video), consolidated."""
+    found = []
+    for start, duration in spans:
+        with tempfile.TemporaryDirectory(prefix="echo-webcam-") as tmp:
+            frames = sample_frames(input_at, start, duration, width, height, Path(tmp))
+        found.append(analyse(frames, detector))
+    boxes = consolidate(found)
+    log.info("webcams: %s", boxes)
+    return boxes
 
 
 class ExcludingDetector:

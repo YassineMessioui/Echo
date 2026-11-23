@@ -45,7 +45,7 @@ from echo.job import Job, _atomic_write
 from echo.models import ClipSpec, Speakers, StageName
 from echo.reframe import crop_window, frame_geometry, video_filter_for
 from echo.reframe import video_filter as reframe_filter
-from echo.webcam import ExcludingDetector, detect_webcam, overlay_filter
+from echo.webcam import Box, ExcludingDetector, detect_webcams, overlay_filter
 
 log = logging.getLogger(__name__)
 
@@ -193,25 +193,22 @@ def cut_clips(
         else:
             geometry = frame_geometry(video)
         window = crop_window(geometry[0], geometry[1], sar=geometry[2])
-    known_webcam = None
-    for clip, out in zip(clips, outputs, strict=True):
+    webcams: list[Box | None] = [None] * len(clips)
+    if webcam and window is not None:
+        # All clips first: a stream's webcam stays put, so the boxes are consolidated.
+        started = time.monotonic()
+        webcams = detect_webcams(
+            lambda t: video_input_args(video, t, exact=False),
+            [(c.start, c.duration) for c in clips],
+            *window[:2],
+            detector or default_detector(),
+        )
+        log.info("webcam search took %.1f s", time.monotonic() - started)
+    for clip, out, box in zip(clips, outputs, webcams, strict=True):
         clip_filter = video_filter
         if window is not None and geometry is not None:
             width, height, sar = geometry
             found = detector or default_detector()
-            box = None
-            if webcam:
-                started = time.monotonic()
-                box = detect_webcam(
-                    lambda t: video_input_args(video, t, exact=False),
-                    clip.start,
-                    clip.duration,
-                    *window[:2],
-                    found,
-                    known=known_webcam,
-                )
-                known_webcam = box or known_webcam  # a stream's webcam stays put
-                log.info("webcam search took %.1f s", time.monotonic() - started)
             if face:
                 started = time.monotonic()
                 x = frame_crop(
