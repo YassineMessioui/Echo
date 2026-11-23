@@ -110,8 +110,8 @@ class Score(_Artifact):
     """How well a topic works as a standalone short clip (#21), each criterion 0–10.
 
     Set by the score stage from the clip's own transcript text. ``overall`` is the
-    weighted mean the stage ranks by (``echo.llm.scoring``); ``reason`` is the LLM's
-    one-line justification.
+    weighted mean the stage ranks by (``echo.llm.scoring``), blended with ``replay``
+    when the link has a heatmap (#123); ``reason`` is the LLM's one-line justification.
     """
 
     overall: float = Field(ge=0, le=10)
@@ -120,6 +120,16 @@ class Score(_Artifact):
     clarity: float = Field(ge=0, le=10, description="Understandable without context.")
     energy: float = Field(ge=0, le=10, description="Delivery: emotion, pace, stakes.")
     reason: str = ""
+    replay: float | None = Field(
+        default=None,
+        ge=0,
+        le=10,
+        exclude_if=lambda v: v is None,
+        description="How much viewers rewatch the clip's span (#123), from the link's "
+        "'Most replayed' heatmap: 5 = the video's median, 10 = its peak. When set, "
+        "``overall`` blends it in with ``ScoreConfig.replay_weight``. None (and absent "
+        "from scores.json) without a heatmap.",
+    )
 
 
 class Topic(_Artifact):
@@ -186,6 +196,41 @@ class Speakers(_Artifact):
             return best
         mid = (start + end) / 2
         return min(self.turns, key=lambda t: min(abs(mid - t.start), abs(mid - t.end))).speaker
+
+
+# --- heatmap.json (link jobs, #123) ------------------------------------------------
+
+
+class HeatmapPoint(_Artifact):
+    """One bar of YouTube's "Most replayed" graph, in original-video time."""
+
+    start: float = Field(ge=0)
+    end: float = Field(ge=0)
+    value: float = Field(ge=0, le=1, description="Relative replays; the video's peak is 1.")
+
+    @model_validator(mode="after")
+    def _ordered(self) -> HeatmapPoint:
+        if self.end <= self.start:
+            raise ValueError(f"heatmap point end ({self.end}) <= start ({self.start})")
+        return self
+
+
+class ReplayHeatmap(_Artifact):
+    """Where viewers rewatch the video (yt-dlp's ``info["heatmap"]``, ~100 points).
+
+    Saved by ``job_from_url`` when the link has one (YouTube shows it once a video has
+    enough views); absent otherwise. Times are original-video time, like transcripts,
+    so a focus range (#59) needs no shift.
+    """
+
+    points: list[HeatmapPoint] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _sorted(self) -> ReplayHeatmap:
+        for prev, cur in zip(self.points, self.points[1:], strict=False):
+            if cur.start < prev.start:
+                raise ValueError("heatmap points must be sorted by start")
+        return self
 
 
 # --- clips.json (stage: refine) -------------------------------------------------

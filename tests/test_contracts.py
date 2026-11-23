@@ -417,6 +417,61 @@ def test_scores_round_trip_and_topics_json_has_no_null_score(job_copy: Job):
     assert "score" not in job_copy.topics_path.read_text()
 
 
+# --- replay heatmap (#123) ---------------------------------------------------------------
+
+
+def test_scores_without_replay_keep_their_shape(job_copy: Job, golden_job: Job):
+    """Old scores.json load with ``replay=None``, and are written back byte for byte."""
+    scored = golden_job.read_scores()
+    assert all(t.score is not None and t.score.replay is None for t in scored)
+    job_copy.write_scores(scored)
+    golden = golden_job.scores_path.read_bytes()
+    assert job_copy.scores_path.read_bytes() == golden.rstrip(b"\n")  # golden ends in \n
+    assert "replay" not in job_copy.scores_path.read_text()
+
+
+def test_replay_round_trips_and_is_between_0_and_10(job_copy: Job):
+    from echo.models import Score
+
+    ok = {"overall": 5, "hook": 5, "payoff": 5, "clarity": 5, "energy": 5}
+    topic = job_copy.read_topics()[0].model_copy(update={"score": Score(**ok, replay=8.1)})
+    job_copy.write_scores([topic])
+    assert job_copy.read_scores() == [topic]
+    assert '"replay": 8.1' in job_copy.scores_path.read_text()
+    for bad in (-1, 11):
+        with pytest.raises(ValidationError):
+            Score(**ok, replay=bad)
+
+
+def test_heatmap_validation_and_round_trip(job_copy: Job):
+    from echo.models import HeatmapPoint, ReplayHeatmap
+
+    heatmap = ReplayHeatmap(
+        points=[HeatmapPoint(start=0, end=10, value=0.4), HeatmapPoint(start=10, end=20, value=1)]
+    )
+    assert job_copy.heatmap_path == job_copy.root / "heatmap.json"
+    assert not job_copy.heatmap_path.exists(), "local and old jobs have none"
+    job_copy.write_heatmap(heatmap)
+    assert job_copy.read_heatmap() == heatmap
+    with pytest.raises(ValidationError):
+        HeatmapPoint(start=5, end=5, value=0.5)
+    with pytest.raises(ValidationError):
+        HeatmapPoint(start=0, end=5, value=1.5)
+    with pytest.raises(ValidationError):
+        ReplayHeatmap(points=[])
+    with pytest.raises(ValidationError):
+        ReplayHeatmap(points=list(reversed(heatmap.points)))
+
+
+def test_replay_weight_default_and_range():
+    from echo.config import ScoreConfig
+
+    assert 0 <= ScoreConfig().replay_weight <= 1
+    for bad in (-0.1, 1.1):
+        with pytest.raises(ValidationError):
+            ScoreConfig(replay_weight=bad)
+
+
 def test_old_job_json_without_score_stage_loads(golden_job: Job):
     assert golden_job.read_meta().stages[StageName.SCORE].status is StageStatus.PENDING
 

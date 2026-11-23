@@ -113,6 +113,10 @@ class ScoreConfig(_Section):
 
     enabled: bool = True
     """Off: no score stage, and ``max_clips`` keeps the clips closest to ~37 s."""
+    replay_weight: float = Field(default=0.3, ge=0, le=1)
+    """Share of YouTube's "Most replayed" signal in ``Score.overall`` (#123):
+    ``overall = (1 - w) * llm + w * replay``. Only used when the link has a heatmap
+    (``Job.heatmap_path``); 0 shows the replay score without ranking by it."""
 
 
 class ClipConfig(_Section):

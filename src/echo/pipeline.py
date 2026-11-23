@@ -21,11 +21,13 @@ Behaviour of ``run_pipeline``:
 - Re-running after a failure resumes at the failed stage, because the completed stages'
   outputs exist.
 - A stage may define ``settings(config) -> str | None``, a fingerprint of the settings
-  its outputs depend on. It's recorded in ``job.json`` (``StageRecord.settings``), and a
-  stage whose fingerprint changed re-runs even though its outputs exist (and so forces
-  the later stages). A failed re-run keeps the old fingerprint, so it's retried next
-  time. A job recorded before a stage had settings keeps its outputs and adopts the
-  current fingerprint, but only if that stage last finished (done or skipped).
+  its outputs depend on (or ``settings(config, job)``, when it also depends on an
+  optional input in the job, like the score stage on ``heatmap.json``, #123). It's
+  recorded in ``job.json`` (``StageRecord.settings``), and a stage whose fingerprint
+  changed re-runs even though its outputs exist (and so forces the later stages). A
+  failed re-run keeps the old fingerprint, so it's retried next time. A job recorded
+  before a stage had settings keeps its outputs and adopts the current fingerprint,
+  but only if that stage last finished (done or skipped).
 - While a stage runs, its ``echo.progress.report(fraction, detail)`` calls become
   ``RUNNING`` events with ``progress`` / ``detail`` (non-decreasing, ending at 1.0).
 """
@@ -33,6 +35,7 @@ Behaviour of ``run_pipeline``:
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -246,7 +249,7 @@ def run_pipeline(
         # re-run that fails can't make old outputs look current on the next run.
         kept = last.settings
         try:
-            settings = _settings(stage, config)
+            settings = _settings(stage, config, job)
             changed = settings is not None and (
                 settings != kept
                 if kept is not None
@@ -292,10 +295,14 @@ def run_pipeline(
     return job.read_meta()
 
 
-def _settings(stage: Stage, config: PipelineConfig) -> str | None:
+def _settings(stage: Stage, config: PipelineConfig, job: Job) -> str | None:
     """The stage's optional settings fingerprint (see the module docstring)."""
     fingerprint = getattr(stage, "settings", None)
-    return fingerprint(config) if callable(fingerprint) else None
+    if not callable(fingerprint):
+        return None
+    if len(inspect.signature(fingerprint).parameters) >= 2:
+        return fingerprint(config, job)
+    return fingerprint(config)
 
 
 def _progress_sink(name: StageName, emit: Callable[[StageEvent], None]) -> progress.ProgressSink:

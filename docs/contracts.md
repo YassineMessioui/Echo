@@ -27,7 +27,7 @@ flowchart LR
 | #8 | llm | `echo/llm/topics.py` | `TopicExtractor` | `TranscriptWindow` | `list[Topic]` (ids inside window) |
 | #9 | llm | `echo/llm/merge.py` | `TopicMerger` | `list[list[Topic]]` | `list[Topic]` → `topics.json` |
 | #22 | diarize (optional) | `echo/diarize.py` | `Diarizer` | `audio.wav`, `transcript.json` (offset) | `Speakers` → `speakers.json` |
-| #106 | score (optional) | `echo/llm/scoring.py` | `ClipScorer` | `transcript.json`, `topics.json` | `list[Topic]` with `score` → `scores.json` |
+| #106 | score (optional) | `echo/llm/scoring.py` | `ClipScorer` | `transcript.json`, `topics.json`, `heatmap.json` if any (#123) | `list[Topic]` with `score` → `scores.json` |
 | #10 | refine | `echo/refine.py` | `BoundaryRefiner` | `Transcript`, `list[Topic]` | `list[ClipSpec]` → `clips.json` |
 | #11 | clip | `echo/clip.py` | `Clipper` | `input.mp4` (or a `RemoteVideo` for links), `list[ClipSpec]`, optional `Speakers` (#16) | `clips/<nn>-<slug>.mp4` |
 | #12 | orchestration | `echo/pipeline.py` | `Stage` adapters + runner | `Job` | `job.json` |
@@ -62,7 +62,8 @@ flowchart LR
   configured otherwise. Platform credentials live in `.env` / an OAuth token cache,
   never in config or the job directory.
 - **Re-running on changed settings:** a stage can define `settings(config) -> str | None`
-  (a fingerprint of the config its outputs depend on). The orchestrator records it in
+  (a fingerprint of the config its outputs depend on), or `settings(config, job)` when
+  they also depend on an optional input in the job (the score stage on `heatmap.json`). The orchestrator records it in
   `job.json` and re-runs the stage, and so the later ones, when it changes.
 - **Progress:** call `echo.progress.report(fraction, detail)` inside `Stage.run`. It
   becomes a `RUNNING` `StageEvent` with `progress` / `detail`. Report from the stage's

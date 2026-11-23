@@ -210,8 +210,11 @@ class Stage(Protocol):
 
     Optional: ``settings(config) -> str | None``, a fingerprint of the config its outputs
     depend on (e.g. the whisper model and batch size). When it changes, the orchestrator
-    re-runs the stage even though its outputs exist. Report progress inside ``run`` with
-    ``echo.progress.report(fraction, detail)``.
+    re-runs the stage even though its outputs exist. ``settings(config, job)`` also gets
+    the job, for outputs that depend on an optional input (``heatmap.json``, #123).
+    Report progress inside ``run`` with ``echo.progress.report(fraction, detail)``.
+    Exactly those two forms: the orchestrator picks by the number of parameters, so
+    don't add a defaulted third one.
     """
 
     name: StageName
