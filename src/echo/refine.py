@@ -17,6 +17,8 @@ a hard platform cap).
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
@@ -97,14 +99,30 @@ def _cut_long_segment(segment: Segment, max_d: float) -> float:
 
 
 IDEAL_DURATION = 37.5
-"""Seconds; clips closest to this are kept by ``max_clips`` (30–45 s is the sweet spot for
-complete, self-contained short-form clips)."""
+"""Seconds; without scores, clips closest to this are kept by ``max_clips`` (30–45 s is
+the sweet spot for complete, self-contained short-form clips). With scores it breaks ties."""
 
 
-def _keep_best(clips: list[ClipSpec], limit: int) -> list[ClipSpec]:
-    """The ``limit`` clips closest to ``IDEAL_DURATION`` (earlier wins ties), in time order.
-    A stand-in until clip scoring (#21) ranks by engagement."""
-    ranked = sorted(clips, key=lambda c: (abs(c.duration - IDEAL_DURATION), c.start))
+def topic_scores(topics: list[Topic]) -> dict[str, float]:
+    """Each scored topic's ``Score.overall`` by title (a clip's ``topic_title``); the
+    highest one if two topics share a title."""
+    scores: dict[str, float] = {}
+    for topic in topics:
+        if topic.score is not None:
+            scores[topic.title] = max(topic.score.overall, scores.get(topic.title, 0.0))
+    return scores
+
+
+def _keep_best(clips: list[ClipSpec], limit: int, scores: dict[str, float]) -> list[ClipSpec]:
+    """The ``limit`` best clips, in time order: the highest scored (#21), then the closest
+    to ``IDEAL_DURATION``, then the earliest. Unscored clips rank after scored ones, so
+    without any scores this is the duration rule alone."""
+
+    def rank(clip: ClipSpec) -> tuple[bool, float, float, float]:
+        score = scores.get(clip.topic_title)
+        return (score is None, -(score or 0.0), abs(clip.duration - IDEAL_DURATION), clip.start)
+
+    ranked = sorted(clips, key=rank)
     return sorted(ranked[:limit], key=lambda c: c.start)
 
 
@@ -114,13 +132,14 @@ def refine_clips(
     """Implements ``echo.interfaces.BoundaryRefiner``.
 
     With ``config.max_clips``, all clips are refined first, the best ones are chosen
-    (``_keep_best``), and then only the chosen topics are refined again: a kept clip
-    shouldn't stay trimmed by an overlapping neighbour that was dropped.
+    (``_keep_best``: by ``Topic.score`` when topics are scored, #21), and then only the
+    chosen topics are refined again: a kept clip shouldn't stay trimmed by an overlapping
+    neighbour that was dropped.
     """
     clips = _refine(transcript, topics, config)
     if config.max_clips is None or len(clips) <= config.max_clips:
         return clips
-    kept = _keep_best(clips, config.max_clips)
+    kept = _keep_best(clips, config.max_clips, topic_scores(topics))
     titles = {c.topic_title for c in kept}
     again = _refine(transcript, [t for t in topics if t.title in titles], config)
     # Re-refining can merge/drop differently in rare cases; then keep the first choice.
@@ -177,9 +196,27 @@ def _refine(transcript: Transcript, topics: list[Topic], config: RefineConfig) -
 _: BoundaryRefiner = refine_clips
 
 
+def scored_topics(job: Job, config: PipelineConfig) -> list[Topic]:
+    """The topics to refine: ``scores.json`` when scoring is on (#21) and it holds the
+    same topics as ``topics.json``, else ``topics.json`` (scoring off, or a stale or
+    missing ``scores.json``)."""
+    topics = job.read_topics()
+    if not config.score.enabled or not job.scores_path.is_file():
+        return topics
+    scored = job.read_scores()
+    if [t.model_copy(update={"score": None}) for t in scored] != topics:
+        return topics
+    return scored
+
+
 @dataclass
 class RefineStage:
-    """Stage adapter: ``transcript.json`` + ``topics.json`` → ``clips.json``."""
+    """Stage adapter: ``transcript.json`` + ``topics.json`` (or ``scores.json``) →
+    ``clips.json``.
+
+    Its ``settings`` fingerprint is ``RefineConfig`` and whether scoring is on, so
+    changing ``--max-clips`` or the durations on an existing job re-runs refine.
+    """
 
     refiner: BoundaryRefiner = refine_clips
 
@@ -188,6 +225,10 @@ class RefineStage:
     def outputs(self, job: Job) -> list[Path]:
         return [job.clips_path]
 
+    def settings(self, config: PipelineConfig) -> str:
+        data = {"refine": config.refine.model_dump(mode="json"), "score": config.score.enabled}
+        return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
+
     def run(self, job: Job, config: PipelineConfig) -> None:
-        clips = self.refiner(job.read_transcript(), job.read_topics(), config.refine)
+        clips = self.refiner(job.read_transcript(), scored_topics(job, config), config.refine)
         job.write_clips(clips)

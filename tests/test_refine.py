@@ -5,8 +5,9 @@ import pytest
 from echo.config import PipelineConfig, RefineConfig
 from echo.errors import ArtifactError
 from echo.job import Job
-from echo.models import ClipSpec, Segment, Topic, Transcript, Word
-from echo.refine import RefineStage, refine_clips, resolve_overlaps
+from echo.models import ClipSpec, Score, Segment, StageName, StageStatus, Topic, Transcript, Word
+from echo.pipeline import run_pipeline
+from echo.refine import RefineStage, refine_clips, resolve_overlaps, scored_topics, topic_scores
 
 NO_PAD = RefineConfig(padding=0)
 
@@ -276,3 +277,108 @@ def test_kept_clip_is_not_left_trimmed_by_a_dropped_neighbour():
     assert [(c.topic_title, c.start, c.end) for c in all_clips] == [("A", 0, 60), ("B", 60, 90)]
     (only,) = refine_clips(transcript, topics, RefineConfig(padding=0, max_clips=1))
     assert (only.topic_title, only.start, only.end) == ("B", 40, 90)
+
+
+# --- max_clips by score (#21) ------------------------------------------------------------
+
+
+def _scored(topic: Topic, overall: float | None) -> Topic:
+    if overall is None:
+        return topic
+    score = Score(overall=overall, hook=overall, payoff=overall, clarity=overall, energy=overall)
+    return topic.model_copy(update={"score": score})
+
+
+def _four(*scores: float | None) -> tuple[Transcript, list[Topic]]:
+    # a=16 s, b=36 s, c=58 s, d=40 s: by duration alone, b and d are kept.
+    transcript = _transcript([16, 36, 58, 40])
+    topics = [_topic(i, i, t) for i, t in enumerate("abcd")]
+    return transcript, [_scored(t, s) for t, s in zip(topics, scores, strict=True)]
+
+
+@pytest.mark.parametrize(
+    ("scores", "max_clips", "expected"),
+    [
+        pytest.param((9, 2, 8, 3), 2, ["a", "c"], id="highest-scores-in-time-order"),
+        pytest.param((1, 9, 2, 3), 1, ["b"], id="single"),
+        pytest.param((5, 5, 5, 5), 2, ["b", "d"], id="ties-closest-to-ideal"),
+        pytest.param((7, 5, 7, 5), 1, ["c"], id="tie-closer-to-ideal-wins"),
+        pytest.param((None, None, None, None), 2, ["b", "d"], id="no-scores-duration-fallback"),
+        pytest.param((None, 2, None, 1), 3, ["b", "c", "d"], id="unscored-after-scored"),
+        pytest.param((9, 2, 8, 3), None, ["a", "b", "c", "d"], id="no-limit-keeps-all"),
+    ],
+)
+def test_max_clips_keeps_the_best_scored(scores, max_clips, expected):
+    transcript, topics = _four(*scores)
+    config = RefineConfig(padding=0, max_clips=max_clips)
+    clips = refine_clips(transcript, topics, config)
+    assert [c.topic_title for c in clips] == expected
+    check_invariants(transcript, clips, config)
+
+
+def test_score_ties_at_the_same_duration_keep_the_earlier_clip():
+    transcript = _transcript([30, 30, 30])
+    topics = [_scored(_topic(i, i, t), 6) for i, t in enumerate("xyz")]
+    clips = refine_clips(transcript, topics, RefineConfig(padding=0, max_clips=2))
+    assert [c.topic_title for c in clips] == ["x", "y"]
+
+
+def test_kept_scored_clip_is_refined_again_without_its_dropped_neighbour():
+    transcript = _transcript([10] * 9)
+    topics = [_scored(_topic(0, 5, "A"), 3), _scored(_topic(4, 8, "B"), 9)]
+    (only,) = refine_clips(transcript, topics, RefineConfig(padding=0, max_clips=1))
+    assert (only.topic_title, only.start, only.end) == ("B", 40, 90)
+
+
+def test_topic_scores_keep_the_best_of_duplicate_titles():
+    topics = [_scored(_topic(0, 0, "x"), 3), _scored(_topic(1, 1, "x"), 7), _topic(2, 2, "y")]
+    assert topic_scores(topics) == {"x": 7}
+
+
+# --- RefineStage reads scores.json (#21) -----------------------------------------------
+
+
+def test_stage_ranks_by_scores_json(job_copy: Job):
+    """Golden scores: solar 6.2, sleep 7.6; by duration alone solar (25.7 s) would lose
+    too, so make sleep the worse one and check scores.json decides."""
+    scored = job_copy.read_scores()
+    flipped = [
+        t.model_copy(update={"score": t.score.model_copy(update={"overall": 10 - t.score.overall})})
+        for t in scored
+    ]
+    job_copy.write_scores(flipped)
+    config = PipelineConfig(refine={"max_clips": 1})
+    RefineStage().run(job_copy, config)
+    assert [c.topic_title for c in job_copy.read_clips()] == [scored[0].title]
+
+
+def test_scored_topics_fall_back_to_topics_json(job_copy: Job):
+    topics = job_copy.read_topics()
+    assert scored_topics(job_copy, PipelineConfig()) == job_copy.read_scores()
+    assert scored_topics(job_copy, PipelineConfig(score={"enabled": False})) == topics
+    job_copy.write_topics(topics[:1])  # topics changed since scoring: stale scores.json
+    assert scored_topics(job_copy, PipelineConfig()) == topics[:1]
+    job_copy.scores_path.unlink()
+    assert scored_topics(job_copy, PipelineConfig()) == topics[:1]
+
+
+def test_refine_reruns_when_its_settings_change(job_copy: Job):
+    """``--max-clips`` on an existing job re-runs refine (it used to need --from-stage)."""
+    stages = [RefineStage()]
+    run_pipeline(job_copy, stages, PipelineConfig())
+    assert len(job_copy.read_clips()) == 2
+    meta = run_pipeline(job_copy, stages, PipelineConfig())
+    assert meta.stages[StageName.REFINE].status is StageStatus.SKIPPED
+    run_pipeline(job_copy, stages, PipelineConfig(refine={"max_clips": 1}))
+    assert len(job_copy.read_clips()) == 1
+    run_pipeline(
+        job_copy, stages, PipelineConfig(refine={"max_clips": 1}, score={"enabled": False})
+    )
+    assert job_copy.read_meta().stages[StageName.REFINE].status is StageStatus.DONE
+    # Settings refine doesn't depend on don't re-run it.
+    meta = run_pipeline(
+        job_copy,
+        stages,
+        PipelineConfig(refine={"max_clips": 1}, score={"enabled": False}, llm={"model": "x"}),
+    )
+    assert meta.stages[StageName.REFINE].status is StageStatus.SKIPPED
