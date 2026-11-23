@@ -562,3 +562,13 @@ def test_stage_numbering_follows_the_built_stages(fake, video, jobs_dir, monkeyp
     fake.events = [StageEvent(StageName.DIARIZE, StageStatus.DONE, elapsed=1.0)]
     result = run(video, jobs_dir, "--speakers")
     assert "[3/4] diarize     done      1.0s" in result.stdout
+
+
+def test_webcam_options(fake, video, jobs_dir):
+    """#126: on by default; --no-webcam and --webcam-corner reach ClipConfig."""
+    assert run(video, jobs_dir).exit_code == 0
+    assert (fake.config.clip.webcam, fake.config.clip.webcam_corner) == ("auto", "top-left")
+    result = run(video, jobs_dir, "--no-webcam", "--webcam-corner", "bottom-right")
+    assert result.exit_code == 0, result.output
+    assert (fake.config.clip.webcam, fake.config.clip.webcam_corner) == ("off", "bottom-right")
+    assert run(video, jobs_dir, "--webcam-corner", "middle").exit_code == 2

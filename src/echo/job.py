@@ -11,6 +11,7 @@ jobs/<job_id>/
   heatmap.json           # link jobs with a "Most replayed" graph (#123)
   clips.json             # stage: refine
   clips/<nn>-<slug>.mp4  # stage: clip
+  clips/publish.json     # command: publish (#67): text, approval, results per clip
   job.json               # orchestrator
 """
 
@@ -28,10 +29,11 @@ from pathlib import Path
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from echo.errors import ArtifactError, InvalidInputError
-from echo.models import ClipSpec, JobMeta, ReplayHeatmap, Speakers, Topic, Transcript
+from echo.models import ClipPost, ClipSpec, JobMeta, ReplayHeatmap, Speakers, Topic, Transcript
 
 _TOPICS = TypeAdapter(list[Topic])
 _CLIPS = TypeAdapter(list[ClipSpec])
+_POSTS = TypeAdapter(list[ClipPost])
 
 SLUG_MAX_LEN = 50
 
@@ -53,6 +55,14 @@ def _atomic_write(path: Path, data: bytes) -> None:
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def _unique_clips(posts: list[ClipPost], path: Path) -> None:
+    seen: set[str] = set()
+    for post in posts:
+        if post.clip in seen:
+            raise ArtifactError(f"invalid artifact {path}: clip {post.clip!r} is listed twice")
+        seen.add(post.clip)
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:
@@ -162,6 +172,12 @@ class Job:
         return self.root / "clips"
 
     @property
+    def publish_path(self) -> Path:
+        """``clips/publish.json``: one ``ClipPost`` per clip (#67). Absent until the
+        clips' text is generated (#101)."""
+        return self.clips_dir / "publish.json"
+
+    @property
     def meta_path(self) -> Path:
         return self.root / "job.json"
 
@@ -207,6 +223,15 @@ class Job:
 
     def write_clips(self, clips: list[ClipSpec]) -> None:
         _atomic_write(self.clips_path, _CLIPS.dump_json(clips, indent=2))
+
+    def read_posts(self) -> list[ClipPost]:
+        posts = self._read_list(self.publish_path, _POSTS)
+        _unique_clips(posts, self.publish_path)
+        return posts
+
+    def write_posts(self, posts: list[ClipPost]) -> None:
+        _unique_clips(posts, self.publish_path)
+        _atomic_write(self.publish_path, _POSTS.dump_json(posts, indent=2, exclude_defaults=True))
 
     def read_meta(self) -> JobMeta:
         return self._read_model(self.meta_path, JobMeta)

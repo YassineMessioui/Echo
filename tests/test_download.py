@@ -318,3 +318,56 @@ def test_video_source_without_any_input(tmp_path):
     job.root.mkdir()
     with pytest.raises(ArtifactError, match="input.mp4"):
         download.video_source(job, ydl_factory=factory())
+
+
+def _picks(formats: list[dict]) -> str:
+    """The format id yt-dlp's own selector picks with ``VIDEO_FORMAT``."""
+    import yt_dlp
+
+    with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+        selector = ydl.build_format_selector(download.VIDEO_FORMAT)
+        ctx = {"formats": formats, "has_merged_format": False, "incomplete_formats": False}
+        return next(iter(selector(ctx)))["format_id"]
+
+
+def _fmt(format_id: str, height: int, vcodec: str) -> dict:
+    return {
+        "format_id": format_id,
+        "height": height,
+        "width": height * 16 // 9,
+        "vcodec": vcodec,
+        "acodec": "none",
+        "ext": "mp4" if vcodec.startswith("avc1") else "webm",
+        "url": f"https://example.com/{format_id}",
+        "protocol": "https",
+    }
+
+
+def test_remote_video_prefers_the_sharpest_stream_up_to_4k():
+    """A 9:16 crop of 1080p is stretched 1.8x; from 2160p it's shrunk, so it stays sharp."""
+    formats = [
+        _fmt("137", 1080, "avc1.640028"),
+        _fmt("248", 1080, "vp09.00.40.08"),
+        _fmt("271", 1440, "vp09.00.50.08"),
+        _fmt("401", 2160, "av01.0.12M.08"),
+        _fmt("313", 2160, "vp09.00.51.08"),
+        _fmt("571", 4320, "av01.0.16M.08"),
+    ]
+    assert _picks(formats) == "313"  # 4K VP9: never 8K, and VP9 before AV1
+    assert _picks([f for f in formats if f["format_id"] != "313"]) == "401"  # 4K AV1
+    assert _picks(formats[:2]) == "137"  # up to 1080p: H.264 first, as before
+    hls = _fmt("625", 2160, "vp09.00.50.08") | {"protocol": "m3u8_native"}
+    assert _picks([*formats, hls]) == "313"  # HTTPS (byte-range seeks) before HLS
+    assert _picks([formats[0], hls]) == "625"  # but HLS 4K still beats 1080p
+
+
+def test_never_a_non_seekable_or_hdr_stream_over_a_good_1080p():
+    """Fragmented DASH can't be read remotely (it would force a full download), and HDR
+    would come out washed out (no tone mapping): 1080p H.264 is better than either."""
+    h264 = _fmt("137", 1080, "avc1.640028")
+    dash = _fmt("700", 2160, "vp09.00.51.08") | {"protocol": "http_dash_segments"}
+    assert _picks([h264, dash]) == "137"
+    sdr = _fmt("313", 2160, "vp09.00.51.08") | {"dynamic_range": "SDR"}
+    hdr = _fmt("337", 2160, "vp09.02.51.10") | {"dynamic_range": "HDR10"}
+    assert _picks([h264, sdr, hdr]) == "313"
+    assert _picks([h264, hdr]) == "137"

@@ -42,8 +42,29 @@ FORMAT = "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=
 
 AUDIO_FORMAT = "ba[ext=m4a]/ba"
 
-VIDEO_FORMAT = "bv*[height<=1080][vcodec^=avc1]/bv*[height<=1080]/b[height<=1080]/b"
-"""Video read remotely at clip time; H.264 first because it's the cheapest to decode."""
+
+def _video_format_spec() -> str:
+    # Above 1080p, only seekable streams (fragmented DASH would force a full download,
+    # where the 1080p fallback is read remotely) and only SDR (clips are encoded as
+    # yuv420p without tone mapping, so HDR would come out washed out).
+    tiers = [
+        "[height>1440][height<=2160][dynamic_range=?SDR]",
+        "[height>1080][height<=1440][dynamic_range=?SDR]",
+    ]
+    alternatives = [
+        f"bv*{tier}{extra}"
+        for tier in tiers
+        for extra in ("[vcodec^=vp09][protocol=https]", "[protocol=https]", "[protocol^=m3u8]")
+    ]
+    alternatives += ["bv*[height<=1080][vcodec^=avc1]", "bv*[height<=1080]", "b[height<=2160]", "b"]
+    return "/".join(alternatives)
+
+
+VIDEO_FORMAT = _video_format_spec()
+"""Video read remotely at clip time: the sharpest stream up to 4K. A 9:16 clip uses only
+a third of a 16:9 frame, so from 1080p it's stretched 1.8x (blurry); from 2160p it's
+shrunk to 1080x1920 (sharp). Above 1080p: plain HTTPS (byte-range seeks) before HLS, and
+VP9 before AV1 (cheaper to decode). At 1080p and below, H.264 first."""
 
 SEEKABLE_PROTOCOLS = frozenset({"http", "https", "m3u8", "m3u8_native"})
 """Streams ffmpeg can seek into over the network (fragmented DASH can't be)."""

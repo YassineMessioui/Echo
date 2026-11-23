@@ -103,7 +103,8 @@ def video_filter(
         width, height = _even(width * sar), _even(height)
         prefix = f"scale={width}:{height},setsar=1,"
     out_w, out_h = TARGET
-    scale = f"scale={out_w}:{out_h}"
+    # lanczos: sharper than the default bicubic when a 9:16 crop is enlarged (#16).
+    scale = f"scale={out_w}:{out_h}:flags=lanczos"
     aspect = width / height
 
     if abs(aspect - VERTICAL) <= ASPECT_TOLERANCE * VERTICAL:
@@ -115,13 +116,16 @@ def video_filter(
     fit_w, fit_h = _fit(width, height)
     x, y = (out_w - fit_w) // 2, (out_h - fit_h) // 2
     if config.background == "black":
-        return f"{prefix}scale={fit_w}:{fit_h},pad={out_w}:{out_h}:{x}:{y}:black,setsar=1"
+        return (
+            f"{prefix}scale={fit_w}:{fit_h}:flags=lanczos,"
+            f"pad={out_w}:{out_h}:{x}:{y}:black,setsar=1"
+        )
     blur_w, blur_h = BLUR_SIZE
     return (
         f"{prefix}split=2[bg][fg];"
         f"[bg]scale={blur_w}:{blur_h}:force_original_aspect_ratio=increase,"
         f"crop={blur_w}:{blur_h},boxblur=10:2,{scale},setsar=1[back];"
-        f"[fg]scale={fit_w}:{fit_h},setsar=1[front];"
+        f"[fg]scale={fit_w}:{fit_h}:flags=lanczos,setsar=1[front];"
         f"[back][front]overlay={x}:{y},setsar=1"
     )
 

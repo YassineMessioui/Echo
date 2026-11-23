@@ -5,6 +5,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from echo.models import Platform
+
 
 class _Section(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -139,6 +141,15 @@ class ClipConfig(_Section):
       otherwise it behaves like ``"face"``).
 
     Ignored with ``aspect="source"`` and for sources that are padded instead of cropped."""
+    webcam: Literal["auto", "off"] = "auto"
+    """Streams (#126): ``"auto"`` looks for a streamer's webcam overlay (a face that stays
+    in one small spot while the gameplay changes) and, when a clip has one, keeps it in a
+    corner of the 9:16 clip, since the crop would cut it. Clips without one are unchanged.
+    Ignored with ``aspect="source"`` and for padded sources."""
+    webcam_corner: Literal["top-left", "top-right", "bottom-left", "bottom-right"] = "top-left"
+    """Where the webcam goes. Top corners stay clear of the captions."""
+    webcam_size: float = Field(default=0.4, ge=0.2, le=0.6)
+    """The webcam's width as a fraction of the clip's width (0.4 = 432 px of 1080)."""
 
 
 HexColour = Annotated[str, Field(pattern=r"^#[0-9A-Fa-f]{6}$")]
@@ -183,8 +194,28 @@ class DiarizeConfig(_Section):
     enabled: bool = False
     num_speakers: int | None = Field(default=None, ge=1)
     """None = estimate the number of speakers."""
-    threshold: float = Field(default=0.5, gt=0, lt=2)
-    """Clustering distance when estimating: lower splits into more speakers."""
+    threshold: float = Field(default=0.8, gt=0, lt=2)
+    """Clustering distance when estimating: lower splits into more speakers. (0.5 split a
+    68-min two-person podcast into 171 speakers, #119.)"""
+    merge_threshold: float = Field(default=0.3, ge=0, lt=2)
+    """When estimating, a second pass merges speakers whose mean voices (TitaNet
+    embeddings) are closer than this cosine distance; 0 = off."""
+    min_speaker_share: float = Field(default=0.02, ge=0, lt=1)
+    """When estimating, speakers with under this share of all speech (laughter,
+    crosstalk, "mm-hm") are folded into the nearest main speaker in time; 0 = off."""
+
+
+class PublishConfig(_Section):
+    """Posting approved clips (#67). Read only by the ``echo-clips publish`` command: a
+    pipeline run never posts anything."""
+
+    platforms: list[Platform] = Field(default_factory=list)
+    """Where ``publish`` posts by default (none until set: posting is always opt-in)."""
+    privacy: Literal["private", "unlisted", "public"] = "private"
+    """Visibility of new posts, where the platform has one (TikTok and Reels map
+    ``unlisted`` to their closest setting)."""
+    require_approval: Literal[True] = True
+    """Only clips approved in review (#102) are published. Fixed: it can't be turned off."""
 
 
 class PipelineConfig(_Section):
@@ -198,3 +229,4 @@ class PipelineConfig(_Section):
     clip: ClipConfig = ClipConfig()
     caption: CaptionConfig = CaptionConfig()
     diarize: DiarizeConfig = DiarizeConfig()
+    publish: PublishConfig = PublishConfig()

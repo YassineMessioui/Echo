@@ -97,7 +97,7 @@ flowchart LR
 | Transcription    | faster-whisper (local), word-level timestamps, optional batching + VAD |
 | Speakers         | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx): pyannote segmentation 3.0 + NeMo TitaNet-small, offline on CPU (no Hugging Face token, no PyTorch) |
 | Moment selection | An LLM behind a swappable `LLMClient`: local through [Ollama](https://ollama.com) or hosted through any OpenAI-compatible API (Groq, Gemini, OpenRouter, Mistral, OpenAI). It returns segment IDs, never timestamps |
-| Reframing        | Centre crop to 9:16 by default (position set by `--crop-x`; near-square sources are padded). `--reframe face` puts the window on the faces of each shot: [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) (MIT, 230 KB) on onnxruntime, camera cuts detected. Speaker following next (#109) |
+| Reframing        | Centre crop to 9:16 by default (position set by `--crop-x`; near-square sources are padded). `--reframe face` puts the window on the faces of each shot: [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) (MIT, 230 KB) on onnxruntime, camera cuts detected. Speaker following next (#109). On streams, the streamer's webcam overlay is found (a still face inside moving gameplay) and kept in a corner (#126) |
 | Captions         | ASS subtitles burned in with FFmpeg + libass, bundled Montserrat ExtraBold, colour per speaker |
 | Queue / jobs     | Synchronous for now; Celery/RQ + Redis later (#20) |
 | Storage          | Local disk first; S3-compatible later (needed for IG/FB, which pull video from a URL) |
@@ -219,11 +219,11 @@ uv run echo-clips run episode.mp4 --no-captions            # no burned-in captio
 Put quotes around links: they contain `?` and `&`, which the shell would otherwise interpret.
 
 - **Links** (YouTube, Vimeo, …): only the audio is downloaded; clips are read straight from the site. Running the same link again resumes its job. Only clip videos you have the rights to use (see Open questions).
-- **Clips** are **9:16 at 1080×1920** by default. `--aspect source` keeps the source framing; `--crop-x` moves the crop window (0 = left, 1 = right). `--reframe face` centres it on the people in each shot instead (about 4 s more per clip), which matters for multi-camera podcasts.
-- **`--speakers`** detects who speaks when (about 5 min of CPU per hour of audio, so it's off by default) and gives each speaker's captions their own colour. `--num-speakers N` fixes the count.
+- **Clips** are **9:16 at 1080×1920** by default. `--aspect source` keeps the source framing; `--crop-x` moves the crop window (0 = left, 1 = right). `--reframe face` centres it on the people in each shot instead (about 4 s more per clip), which matters for multi-camera podcasts. On **streams**, the streamer's webcam is kept in a corner of the clip (`--webcam-corner`, `--no-webcam` to turn it off).
+- **`--speakers`** detects who speaks when (about 5 min of CPU per hour of audio, so it's off by default) and gives each speaker's captions their own colour. The number of speakers is estimated; `--num-speakers N` fixes it.
 - **`--range`** only processes part of the video; clips keep original-video times. It's opt-in: in our tests about a third of the best clips sat outside 15–85 %.
 - **Scoring** (on by default, `--no-score` to skip): the clips are listed best first with a score and a reason, and `--max-clips N` keeps the N best.
-- **Re-running a job** skips the stages that are done; changed settings re-run what they affect. `--force` redoes every stage; `--from-stage <name>` redoes that stage and everything after it.
+- **Re-running a job** skips the stages that are done; changed settings re-run what they affect. `--force` redoes every stage; `--from-stage <name>` redoes that stage and everything after it. Clips cut before the webcam feature (#126) aren't re-cut just because of the upgrade: use `--from-stage clip` on a stream job to add the webcam.
 - **Progress:** long stages show a live line (`[2/5] transcribe   42%  12:30 / 58:10`); Ctrl+C stops at once.
 - Every option and its default: [docs/cli.md](docs/cli.md).
 
@@ -247,7 +247,8 @@ jobs/<job_id>/
 ├── clips/
 │   ├── 01-<slug>.mp4      # clip, one per entry in clips.json
 │   ├── 01-<slug>.ass      # its caption track (kept for inspection)
-│   └── manifest.json      # clip: fingerprints used to skip unchanged clips
+│   ├── manifest.json      # clip: fingerprints used to skip unchanged clips
+│   └── publish.json       # publish (#67): text, approval and post per clip
 └── job.json               # orchestrator: stage status, settings and models used
 ```
 
@@ -314,6 +315,23 @@ The JSON files are the Pydantic models in [`echo.models`](src/echo/models.py); l
 
 ```json
 [{ "topic_title": "Sleep and productivity", "start": 34.0, "end": 80.2, "duration": 46.2 }]
+```
+
+**`clips/publish.json`** (`list[ClipPost]`, #67): one entry per clip, written by the publishing commands, never by a run. `approval` is `pending`, `approved` or `rejected`; only approved clips are posted. `hashtags` have no `#`. `overrides` change the text on one platform, and `results` keeps the latest attempt per platform (an `id` and `url`, or an `error`). Fields at their default are left out.
+
+```json
+[
+  {
+    "clip": "01-sleep-and-productivity.mp4",
+    "topic_title": "Sleep and productivity",
+    "title": "One bad night costs more focus than you think",
+    "description": "Small sleep losses add up.",
+    "hashtags": ["sleep", "productivity"],
+    "overrides": { "tiktok": { "title": "Sleep is a cheat code" } },
+    "approval": "approved",
+    "results": { "youtube": { "id": "abc123", "url": "https://youtube.com/shorts/abc123", "published_at": "2026-11-23T10:00:00Z", "privacy": "private" } }
+  }
+]
 ```
 
 **`job.json`** (`JobMeta`): `status` is `pending`, `running`, `done`, `skipped` or `failed`; `error` is set on failure (`"interrupted"` after Ctrl+C); `settings` fingerprints the config a stage's outputs depend on, so changing it re-runs the stage. Link jobs also record `source_url` and `source_info` (title, uploader, duration).

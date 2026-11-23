@@ -1,0 +1,458 @@
+"""A title, description and hashtags for every clip (#101) → ``clips/publish.json``.
+
+The LLM gets each clip's own transcript text (plus its topic's title and summary) and
+refers to clips by number, as in topic extraction. As many clips go in one call as fit
+the model's window budget: one call for a typical job on a hosted model.
+
+Re-running never overwrites a human's work: clips that already have a post keep it
+(text, approval, overrides and results); only new clips get text. ``regenerate``
+rewrites the text of posts still ``pending`` review, and nothing else.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import tempfile
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any
+
+from echo.config import ChunkConfig, LLMConfig
+from echo.errors import ArtifactError, EchoError, LLMError, TopicExtractionError
+from echo.ffmpeg import ffmpeg
+from echo.interfaces import LLMClient
+from echo.job import Job
+from echo.llm.chunking import approx_tokens, resolve_max_tokens
+from echo.models import Approval, ClipPost, ClipSpec, Transcript
+from echo.publish import prompts
+
+log = logging.getLogger(__name__)
+
+TITLE_MAX = 70
+"""Generated titles stay short enough for every platform's feed (the contract allows 100)."""
+DESCRIPTION_MAX = 300
+DESCRIPTION_LINES = 3
+CONTEXT_MAX = 3
+"""Most context hashtags (the game or show, the streamer or creator) shared by all posts."""
+_VAGUE = re.compile(
+    r"\b(one person|two people|a person|someone|the speaker|a heated exchange between)\b",
+    re.IGNORECASE,
+)
+"""Wording that hides who is in the clip (#129): the LLM must name them instead."""
+HASHTAGS = (3, 5)
+"""Fewest and most hashtags per clip."""
+CLIP_WORDS = 220
+"""Words of a clip's transcript sent to the LLM: enough for a 60 s clip, so long clips
+can't blow the budget."""
+
+_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
+_PROMPT_TOKENS = 700
+"""Budget kept for the system prompt."""
+_ANSWER_TOKENS_PER_CLIP = 120
+MAX_IMAGES = 5
+"""Frames per LLM call (vision APIs cap images per request; 5 is the common floor)."""
+_TOO_LARGE = re.compile(r"\b413\b|too large", re.IGNORECASE)
+"""An LLM error that means "send less at once" (a request-size cap, not a rate limit)."""
+_REFUSES_IMAGES = re.compile(r"image|vision|multimodal|content.?type", re.IGNORECASE)
+"""...that means "this model can't take images": then frames are turned off..."""
+_TRANSIENT = re.compile(r"\bHTTP 5\d\d\b|timed out|timeout|cancel|interrupt|closed", re.IGNORECASE)
+"""...unless it's an outage, a timeout or Ctrl+C, which are re-raised instead."""
+IMAGE_TOKENS = 600
+"""Rough input tokens per frame, for batching (Gemini counts ~258 for 576x512; Groq's
+qwen more)."""
+_THINKING = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+@dataclass(frozen=True)
+class ClipText:
+    """What the LLM is told about one clip."""
+
+    topic_title: str
+    summary: str
+    said: str
+    frame: bytes | None = None
+    """A JPEG of the clip as viewers see it: two moments side by side (``clip_frame``)."""
+
+
+def clip_frame(video: Path, duration: float) -> bytes | None:
+    """A JPEG of two moments of the finished clip (35 % and 70 % in) side by side, each
+    288 wide: what's on screen (a cutscene, gameplay, the streamer's webcam), for vision
+    models (#129). None if the clip can't be read."""
+    if not video.is_file() or duration <= 0:
+        return None
+    with tempfile.TemporaryDirectory(prefix="echo-frame-") as tmp:
+        out = Path(tmp) / "frame.jpg"
+        try:
+            ffmpeg(
+                ["-ss", f"{duration * 0.35:.2f}", "-i", str(video),
+                 "-ss", f"{duration * 0.7:.2f}", "-i", str(video),
+                 "-filter_complex", "[0:v]scale=288:-2[a];[1:v]scale=288:-2[b];[a][b]hstack",
+                 "-frames:v", "1", "-q:v", "5", str(out)]
+            )  # fmt: skip
+        except EchoError as e:
+            log.warning("no frame for %s: %s", video.name, e)
+            return None
+        return out.read_bytes() if out.is_file() else None
+
+
+@dataclass(frozen=True)
+class PostDraft:
+    """Generated text for one clip, within the limits above."""
+
+    title: str
+    description: str
+    hashtags: list[str]
+
+
+class InvalidPostsError(ValueError):
+    """The LLM answer can't be used; the message is sent back to the LLM on retry."""
+
+
+def clip_text(transcript: Transcript, clip: ClipSpec, summary: str = "") -> ClipText:
+    """The transcript text spoken during ``clip`` (segments overlapping it), capped at
+    ``CLIP_WORDS`` words."""
+    words: list[str] = []
+    for seg in transcript.segments:
+        if seg.end > clip.start and seg.start < clip.end:
+            words += seg.text.split()
+    said = " ".join(words[:CLIP_WORDS]) + (" …" if len(words) > CLIP_WORDS else "")
+    return ClipText(topic_title=clip.topic_title, summary=summary, said=said)
+
+
+def _string(item: dict[str, Any], key: str, i: int) -> str:
+    value = item.get(key)
+    if not isinstance(value, str):
+        raise InvalidPostsError(f'entry {i}: "{key}" must be a string')
+    return value.strip()
+
+
+def _hashtags(item: dict[str, Any], i: int) -> list[str]:
+    value = item.get("hashtags")
+    if not isinstance(value, list) or not all(isinstance(t, str) for t in value):
+        raise InvalidPostsError(f'entry {i}: "hashtags" must be a list of strings')
+    tags: list[str] = []
+    for raw in value:
+        tag = raw.strip().lstrip("#")
+        if not tag or any(c.isspace() or c == "#" for c in tag):
+            raise InvalidPostsError(
+                f'entry {i}: hashtag "{raw}" must be one word without spaces or #'
+            )
+        if tag.lower() not in (t.lower() for t in tags):
+            tags.append(tag)
+    low, high = HASHTAGS
+    if not low <= len(tags) <= high:
+        raise InvalidPostsError(
+            f"entry {i}: give {low} to {high} different hashtags, not {len(tags)}"
+        )
+    return tags
+
+
+def _draft(item: dict[str, Any], i: int) -> PostDraft:
+    title = " ".join(_string(item, "title", i).split())
+    if not title:
+        raise InvalidPostsError(f'entry {i}: "title" is empty')
+    if len(title) > TITLE_MAX:
+        raise InvalidPostsError(
+            f'entry {i}: "title" has {len(title)} characters; the most is {TITLE_MAX}'
+        )
+    lines = [line.strip() for line in _string(item, "description", i).splitlines()]
+    description = "\n".join(line for line in lines if line)
+    if not description:
+        raise InvalidPostsError(f'entry {i}: "description" is empty')
+    if len(description.splitlines()) > DESCRIPTION_LINES:
+        raise InvalidPostsError(f'entry {i}: "description" has more than {DESCRIPTION_LINES} lines')
+    if len(description) > DESCRIPTION_MAX:
+        raise InvalidPostsError(
+            f'entry {i}: "description" has {len(description)} characters; '
+            f"the most is {DESCRIPTION_MAX}"
+        )
+    for field, text in (("title", title), ("description", description)):
+        if vague := _VAGUE.search(text):
+            raise InvalidPostsError(
+                f'entry {i}: "{field}" says "{vague.group(0)}"; name them instead (the '
+                "streamer, or the characters, e.g. Jason and Lucia), or describe their role"
+            )
+    return PostDraft(title=title, description=description, hashtags=_hashtags(item, i))
+
+
+def _context(data: dict[str, Any]) -> list[str]:
+    value = data.get("context_hashtags", [])
+    if not isinstance(value, list) or not all(isinstance(t, str) for t in value):
+        raise InvalidPostsError('"context_hashtags" must be a list of strings')
+    tags: list[str] = []
+    for raw in value:
+        tag = raw.strip().lstrip("#")
+        if not tag or any(c.isspace() or c == "#" for c in tag):
+            raise InvalidPostsError(f'context hashtag "{raw}" must be one word without spaces')
+        if tag.lower() not in (t.lower() for t in tags):
+            tags.append(tag)
+    if len(tags) > CONTEXT_MAX:
+        raise InvalidPostsError(f"give at most {CONTEXT_MAX} context hashtags, not {len(tags)}")
+    return tags
+
+
+def _with_context(draft: PostDraft, context: list[str], clip: int) -> PostDraft:
+    """``draft`` with the context hashtags first. Raises if it leaves one out."""
+    have = {t.lower() for t in draft.hashtags}
+    if missing := [t for t in context if t.lower() not in have]:
+        raise InvalidPostsError(
+            f"clip {clip}: its hashtags must include the context hashtags "
+            f"({', '.join(missing)}), first"
+        )
+    wanted = {t.lower() for t in context}
+    rest = [t for t in draft.hashtags if t.lower() not in wanted]
+    return PostDraft(draft.title, draft.description, [*context, *rest])
+
+
+def parse_posts(raw: str, count: int) -> list[PostDraft]:
+    """Parse an LLM answer into one ``PostDraft`` per clip number ``0..count-1``.
+
+    Accepts ``{"context_hashtags": [...], "posts": [...]}`` (every post must carry the
+    context hashtags; they're put first), or a bare list, optionally in a Markdown code
+    fence. Raises InvalidPostsError with a message meant for the LLM.
+    """
+    text = _THINKING.sub("", raw).strip()  # reasoning models may think out loud first
+    if fenced := _FENCE.match(text):
+        text = fenced.group(1)
+    try:
+        data: Any = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise InvalidPostsError(f"the answer is not valid JSON ({e})") from e
+    context: list[str] = []
+    if isinstance(data, dict) and "posts" in data:
+        context = _context(data)
+        data = data["posts"]
+    if not isinstance(data, list):
+        raise InvalidPostsError('expected a JSON object of the form {"posts": [...]}')
+
+    drafts: dict[int, PostDraft] = {}
+    for i, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise InvalidPostsError(f"entry {i} is not an object")
+        clip = item.get("clip")
+        if isinstance(clip, bool) or not isinstance(clip, int):
+            raise InvalidPostsError(f'entry {i}: "clip" must be an integer clip number')
+        if not 0 <= clip < count:
+            raise InvalidPostsError(f"entry {i}: there is no clip {clip}; use 0 to {count - 1}")
+        if clip in drafts:
+            raise InvalidPostsError(f"clip {clip} has more than one entry")
+        drafts[clip] = _with_context(_draft(item, i), context, clip)
+    if missing := [i for i in range(count) if i not in drafts]:
+        raise InvalidPostsError(f"no entry for clip(s) {', '.join(map(str, missing))}")
+    return [drafts[i] for i in range(count)]
+
+
+def _format(i: int, clip: ClipText, image: int | None = None) -> str:
+    topic = f"{clip.topic_title}. {clip.summary}".strip()
+    seen = f"\nOn screen: image {image}" if image is not None else ""
+    return f"[{i}] Topic: {topic}{seen}\nSaid: {clip.said}"
+
+
+class LLMPostWriter:
+    """Writes ``PostDraft``s with any ``LLMClient``.
+
+    An invalid answer is retried up to ``config.max_retries`` times with the error and
+    the previous answer appended, like ``LLMTopicExtractor``; ``LLMError`` from the
+    client is not retried.
+    """
+
+    prompt_version = prompts.POSTS_PROMPT_VERSION
+
+    def __init__(self, client: LLMClient, config: LLMConfig, *, vision: bool = True) -> None:
+        self.client = client
+        self.config = config
+        self.vision = vision
+        """Show the clips' frames to the model; turned off if it refuses images."""
+        self.vision_error: str | None = None
+        self.used_frames = False
+        """Whether any text in this run was written with frames (recorded in job.json)."""
+        self.system = prompts.SYSTEM_PROMPT.format(
+            title_max=TITLE_MAX,
+            context_max=CONTEXT_MAX,
+            description_max=DESCRIPTION_MAX,
+            hashtags_min=HASHTAGS[0],
+            hashtags_max=HASHTAGS[1],
+        )
+
+    def write(self, clips: Sequence[ClipText], source: str = "") -> list[PostDraft]:
+        """Text for ``clips``. ``source`` names the video they come from (e.g. its title
+        and channel), so the text can say what it is (the game, show or creator).
+
+        Clips with a ``frame`` are shown to the model (numbered images), while ``vision``
+        is on. If the model refuses images (not a vision model), the batch is retried
+        without them, ``vision`` turns off for the rest of the run and ``vision_error``
+        says why."""
+        if not clips:
+            return []
+        if self.vision and any(c.frame for c in clips):
+            try:
+                return self._write(clips, source, images=True)
+            except LLMError as e:
+                message = str(e)
+                if _TOO_LARGE.search(message) and len(clips) > 1:
+                    # A request-size cap (e.g. Groq's free tier: 7000 tokens per request):
+                    # fewer clips per call, still with their frames.
+                    half = len(clips) // 2
+                    return self.write(clips[:half], source) + self.write(clips[half:], source)
+                if not (_REFUSES_IMAGES.search(message) and not _TRANSIENT.search(message)):
+                    raise  # an outage, a timeout or Ctrl+C: not a reason to stop sending frames
+                self.vision, self.vision_error = False, message
+                log.warning("the model didn't take the clips' frames, writing from text: %s", e)
+        return self._write(clips, source, images=False)
+
+    def _write(self, clips: Sequence[ClipText], source: str, *, images: bool) -> list[PostDraft]:
+        last = len(clips) - 1
+        frames: list[bytes] = []
+        lines = []
+        for i, clip in enumerate(clips):
+            number = None
+            if images and clip.frame:
+                frames.append(clip.frame)
+                number = len(frames)
+            lines.append(_format(i, clip, number))
+        intro = f"Source video: {source}\n\n" if source else ""
+        original = prompts.USER_PROMPT.format(
+            source=intro, first=0, last=last, clips="\n\n".join(lines)
+        )
+        prompt = original
+        attempts = self.config.max_retries + 1
+        for _ in range(attempts):
+            raw = self.client.complete(
+                self.system, prompt, json_schema=prompts.POSTS_SCHEMA, images=frames
+            )
+            try:
+                drafts = parse_posts(raw, len(clips))
+                self.used_frames = self.used_frames or bool(frames)
+                return drafts
+            except InvalidPostsError as e:
+                error = e
+                prompt = prompts.RETRY_PROMPT.format(
+                    original=original, error=e, answer=raw, first=0, last=last
+                )
+        raise TopicExtractionError(
+            f"LLM post text for {len(clips)} clips was still invalid after {attempts} "
+            f"attempts: {error}"
+        )
+
+    def close(self) -> None:
+        close = getattr(self.client, "close", None)
+        if callable(close):
+            close()
+
+
+def batches(clips: Sequence[ClipText], budget: int) -> list[range]:
+    """Consecutive index ranges of ``clips`` whose prompt and answer fit ``budget``
+    tokens. A clip too long for the budget alone gets a batch of its own."""
+    room = max(budget - _PROMPT_TOKENS, 1)
+    result: list[range] = []
+    start, used, images = 0, 0, 0
+    for i, clip in enumerate(clips):
+        image = 1 if clip.frame else 0
+        cost = approx_tokens(_format(i, clip)) + _ANSWER_TOKENS_PER_CLIP + image * IMAGE_TOKENS
+        if i > start and (used + cost > room or images + image > MAX_IMAGES):
+            result.append(range(start, i))
+            start, used, images = i, 0, 0
+        used += cost
+        images += image
+    if start < len(clips):
+        result.append(range(start, len(clips)))
+    return result
+
+
+def source_of(job: Job) -> str:
+    """What the job's video is, for the LLM: a link's title and channel, else the file
+    name. Empty if unknown."""
+    try:
+        meta = job.read_meta()
+    except ArtifactError:
+        return ""
+    info = meta.source_info
+    title = str(info.get("title") or "").strip()
+    uploader = str(info.get("uploader") or "").strip()
+    if title:
+        return f'"{title}" by {uploader}' if uploader else f'"{title}"'
+    name = Path(meta.source).stem if meta.source else ""
+    return f'a video file named "{name}"' if name else ""
+
+
+@dataclass(frozen=True)
+class PostsUpdate:
+    posts: list[ClipPost]
+    written: list[str]
+    """File names of the clips whose text was (re)generated."""
+    dropped: list[str]
+    """File names of posts removed because their clip is gone (never published)."""
+
+
+def update_posts(
+    job: Job,
+    writer: LLMPostWriter,
+    chunk: ChunkConfig,
+    *,
+    regenerate: bool = False,
+) -> PostsUpdate:
+    """Give every clip in ``clips.json`` a post in ``clips/publish.json``.
+
+    Existing posts are matched by clip file name and topic title and kept as they are,
+    except that ``regenerate`` rewrites the text of those still pending review (their
+    overrides and results stay). New ones start ``pending``. A post whose clip is gone
+    is dropped, unless it was published somewhere: that record is kept, so the clip is
+    never posted twice.
+    """
+    clips = job.read_clips()
+    transcript = job.read_transcript()
+    summaries = {t.title: t.summary for t in job.read_topics()} if job.topics_path.is_file() else {}
+    old = job.read_posts() if job.publish_path.is_file() else []
+    by_key = {(p.clip, p.topic_title): p for p in old}
+
+    names = [job.clip_video_path(i, c.topic_title).name for i, c in enumerate(clips, start=1)]
+    posts: list[ClipPost | None] = []
+    todo: list[int] = []
+    for i, (clip, name) in enumerate(zip(clips, names, strict=True)):
+        post = by_key.pop((name, clip.topic_title), None)
+        if post is None or (regenerate and post.approval is Approval.PENDING):
+            todo.append(i)
+        posts.append(post)
+
+    if todo:
+        texts = [
+            clip_text(transcript, clips[i], summaries.get(clips[i].topic_title, "")) for i in todo
+        ]
+        if writer.vision:  # what's on screen, so the text can tell who is who (#129)
+            texts = [
+                replace(t, frame=clip_frame(job.clips_dir / names[i], clips[i].duration))
+                for t, i in zip(texts, todo, strict=True)
+            ]
+        drafts: list[PostDraft] = []
+        for group in batches(texts, resolve_max_tokens(chunk, writer.config)):
+            drafts += writer.write([texts[k] for k in group], source_of(job))
+        for i, draft in zip(todo, drafts, strict=True):
+            text = {
+                "title": draft.title,
+                "description": draft.description,
+                "hashtags": draft.hashtags,
+            }
+            current = posts[i]
+            if current is None:
+                posts[i] = ClipPost(clip=names[i], topic_title=clips[i].topic_title, **text)
+            else:
+                posts[i] = current.model_copy(update=text)
+
+    taken = set(names)
+    kept = [
+        p for p in by_key.values() if p.clip not in taken and any(r.ok for r in p.results.values())
+    ]
+    dropped = [p.clip for p in by_key.values() if p not in kept]
+    for name in dropped:
+        log.info("dropping the post for %s: its clip is gone", name)
+    result = [p for p in posts if p is not None] + kept
+    job.write_posts(result)
+    if todo:
+        meta = job.read_meta()
+        frames = "+frames" if writer.used_frames else ""
+        meta.models["posts_prompt"] = f"{writer.prompt_version}{frames}"
+        job.write_meta(meta)
+    return PostsUpdate(posts=result, written=[names[i] for i in todo], dropped=dropped)

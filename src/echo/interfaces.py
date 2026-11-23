@@ -11,6 +11,7 @@ failures.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -20,11 +21,15 @@ from echo.config import (
     ClipConfig,
     IngestConfig,
     PipelineConfig,
+    PublishConfig,
     RefineConfig,
 )
 from echo.job import Job
 from echo.models import (
+    ClipPost,
     ClipSpec,
+    Platform,
+    PublishResult,
     Score,
     Speakers,
     SpeakerTurn,
@@ -94,9 +99,19 @@ class LLMClient(Protocol):
     """Recorded in job.json, e.g. 'ollama/llama3.2:3b'."""
 
     def complete(
-        self, system: str, prompt: str, *, json_schema: dict[str, Any] | None = None
+        self,
+        system: str,
+        prompt: str,
+        *,
+        json_schema: dict[str, Any] | None = None,
+        images: Sequence[bytes] = (),
     ) -> str:
         """Return the raw model text. ``json_schema`` asks for structured output if supported.
+
+        ``images`` are JPEG bytes shown to the model with ``prompt`` (#129: a frame of each
+        clip, so the text can tell a game's cutscene from the streamer). Only vision models
+        use them; others may fail with LLMError or silently ignore them, so callers must
+        not rely on an error to know whether the model saw them.
 
         Raises LLMError.
         """
@@ -198,6 +213,8 @@ class Stage(Protocol):
     re-runs the stage even though its outputs exist. ``settings(config, job)`` also gets
     the job, for outputs that depend on an optional input (``heatmap.json``, #123).
     Report progress inside ``run`` with ``echo.progress.report(fraction, detail)``.
+    Exactly those two forms: the orchestrator picks by the number of parameters, so
+    don't add a defaulted third one.
     """
 
     name: StageName
@@ -208,4 +225,25 @@ class Stage(Protocol):
 
     def run(self, job: Job, config: PipelineConfig) -> None:
         """Read the previous stage's artifacts from ``job`` and write this stage's outputs."""
+        ...
+
+
+# --- command: publish (#67) ---------------------------------------------------------
+
+
+class Publisher(Protocol):
+    """Posts clips to one platform. Used by the ``echo-clips publish`` command, never by
+    a pipeline run."""
+
+    platform: Platform
+
+    def publish(self, video: Path, post: ClipPost, config: PublishConfig) -> PublishResult:
+        """Post ``video`` with ``post.text_for(self.platform)``, at ``config.privacy``.
+
+        The caller only passes approved posts (``post.approval``) not yet published on
+        this platform. A failed upload the user can act on (expired sign-in, quota,
+        rejected video) returns a ``PublishResult`` with ``error``, so the other clips
+        still go out; raises PublishError when nothing can be posted at all (e.g. no
+        credentials).
+        """
         ...

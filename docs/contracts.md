@@ -23,7 +23,7 @@ flowchart LR
 | #4 | ingest | `echo/ingest.py` | `AudioExtractor` | `input.mp4` (or `input-audio.m4a` for links) | `audio.wav` (16 kHz mono PCM) |
 | #5 | transcribe | `echo/transcribe.py` | `Transcriber` | `audio.wav` | `Transcript` → `transcript.json` |
 | #6 | llm | `echo/llm/chunking.py` | `Chunker` | `Transcript` | `list[TranscriptWindow]` |
-| #7 | llm | `echo/llm/client.py` | `LLMClient` | system + prompt | raw text |
+| #7 | llm | `echo/llm/client.py` | `LLMClient` | system + prompt (+ optional JPEG `images`, #129) | raw text |
 | #8 | llm | `echo/llm/topics.py` | `TopicExtractor` | `TranscriptWindow` | `list[Topic]` (ids inside window) |
 | #9 | llm | `echo/llm/merge.py` | `TopicMerger` | `list[list[Topic]]` | `list[Topic]` → `topics.json` |
 | #22 | diarize (optional) | `echo/diarize.py` | `Diarizer` | `audio.wav`, `transcript.json` (offset) | `Speakers` → `speakers.json` |
@@ -32,6 +32,9 @@ flowchart LR
 | #11 | clip | `echo/clip.py` | `Clipper` | `input.mp4` (or a `RemoteVideo` for links), `list[ClipSpec]`, optional `Speakers` (#16) | `clips/<nn>-<slug>.mp4` |
 | #12 | orchestration | `echo/pipeline.py` | `Stage` adapters + runner | `Job` | `job.json` |
 | #13 | orchestration | `echo/cli.py` | Typer CLI | args | job directory |
+| #101 | post text (command `posts`) | `echo/publish/text.py` | `LLMPostWriter` | `clips.json`, `transcript.json`, `topics.json` | `ClipPost` text → `clips/publish.json` |
+| #102 | review (command `review`) | `echo/publish/review.py` | `ready_to_publish` (the publish gate) | `clips/publish.json` | `ClipPost.approval` / edited text → `clips/publish.json` |
+| #67 | publish (a command, not a stage) | `echo/publish/` | `Publisher` (one per `Platform`) | `clips/<nn>-<slug>.mp4`, approved `ClipPost`s | `PublishResult` → `clips/publish.json` |
 
 ## Rules
 
@@ -52,6 +55,12 @@ flowchart LR
   `probe()`), which turns failures into `ExternalToolError` / `InvalidInputError`
   with the stderr tail. In tests, generate inputs with the `make_video` fixture and
   mark tests that need the real binaries with `@pytest.mark.ffmpeg`.
+- **Publishing (#67) never happens in a pipeline run.** Only the separate `publish`
+  command posts, only clips whose `ClipPost.approval` is `approved`
+  (`PublishConfig.require_approval` can't be turned off; publishers get their posts
+  from `echo.publish.review.ready_to_publish`), and at `private` unless
+  configured otherwise. Platform credentials live in `.env` / an OAuth token cache,
+  never in config or the job directory.
 - **Re-running on changed settings:** a stage can define `settings(config) -> str | None`
   (a fingerprint of the config its outputs depend on), or `settings(config, job)` when
   they also depend on an optional input in the job (the score stage on `heatmap.json`). The orchestrator records it in
