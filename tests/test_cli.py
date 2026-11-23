@@ -262,9 +262,9 @@ def test_progress_lines(fake, video, jobs_dir):
     result = run(video, jobs_dir)
     lines = result.stdout.splitlines()
     assert lines[:3] == [
-        "[1/5] ingest      done      2.1s",
-        "[2/5] transcribe  skipped",
-        "[3/5] llm         failed    0.5s",
+        "[1/6] ingest      done      2.1s",
+        "[2/6] transcribe  skipped",
+        "[3/6] llm         failed    0.5s",
     ]
 
 
@@ -272,7 +272,7 @@ def test_failed_without_running_event(fake, video, jobs_dir):
     """A stage whose ``outputs()`` raises sends FAILED with no RUNNING before it."""
     fake.events = [StageEvent(StageName.REFINE, StageStatus.FAILED, error="ValueError: x")]
     result = run(video, jobs_dir)
-    assert result.stdout.splitlines()[0] == "[4/5] refine      failed"
+    assert result.stdout.splitlines()[0] == "[5/6] refine      failed"
 
 
 def test_lists_job_dir_and_clip_paths(fake, video, jobs_dir):
@@ -285,6 +285,56 @@ def test_lists_job_dir_and_clip_paths(fake, video, jobs_dir):
         result.stdout
     )
     assert str(job.clip_video_path(2, "Sleep and productivity")) in result.stdout
+
+
+def _with_golden_scores(fake: FakePipeline) -> None:
+    """The fake run also writes the golden topics.json and scores.json (#21)."""
+    run_pipeline = fake.run_pipeline
+
+    def run_and_score(job, *args, **kwargs):
+        meta = run_pipeline(job, *args, **kwargs)
+        for name in ("topics.json", "scores.json"):
+            shutil.copy(GOLDEN_CLIPS.with_name(name), job.root / name)
+        return meta
+
+    fake.run_pipeline = run_and_score  # the test patches cli.run_pipeline with it
+
+
+def test_lists_clips_best_first_with_scores(fake, video, jobs_dir, monkeypatch):
+    fake.write_clips = True
+    _with_golden_scores(fake)
+    monkeypatch.setattr(cli, "run_pipeline", fake.run_pipeline)
+    result = run(video, jobs_dir, "--job-id", "ep42")
+    assert result.exit_code == 0, result.output
+    job = Job(jobs_dir / "ep42")
+    lines = result.stdout.splitlines()
+    start = lines.index("clips (2, best first):")
+    sleep, solar = (
+        job.clip_video_path(2, "Sleep and productivity"),
+        job.clip_video_path(1, "Solar power is now the cheapest electricity"),
+    )
+    assert lines[start + 1 : start + 5] == [
+        f"   7.6  {sleep}",
+        "        Opens on a relatable claim and lands a concrete takeaway.",
+        f"   6.2  {solar}",
+        "        Clear, surprising fact, but a flat delivery.",
+    ]
+
+
+def test_no_score_lists_clips_in_time_order(fake, video, jobs_dir, monkeypatch):
+    fake.write_clips = True
+    _with_golden_scores(fake)
+    monkeypatch.setattr(cli, "run_pipeline", fake.run_pipeline)
+    result = run(video, jobs_dir, "--job-id", "ep42", "--no-score")
+    assert result.exit_code == 0, result.output
+    assert fake.config.score.enabled is False
+    assert "clips (2):" in result.stdout and "best first" not in result.stdout
+
+
+def test_score_is_on_by_default(fake, video, jobs_dir):
+    assert run(video, jobs_dir).exit_code == 0
+    assert fake.config.score.enabled is True
+    assert fake.stages_config.score.enabled is True
 
 
 def test_no_clips_json(fake, video, jobs_dir):
@@ -434,8 +484,8 @@ def test_piped_progress_is_plain_lines_every_10_percent(fake, video, jobs_dir):
     assert [line.split()[2] for line in progress] == [
         f"{p}%" for p in (12, 20, 32, 40, 52, 60, 72, 80, 92, 100)
     ]
-    assert progress[0].startswith("[2/5] transcribe   12%  12s / 100s  ")
-    assert lines[len(progress)] == "[2/5] transcribe  done      3.0s"
+    assert progress[0].startswith("[2/6] transcribe   12%  12s / 100s  ")
+    assert lines[len(progress)] == "[2/6] transcribe  done      3.0s"
 
 
 def test_tty_line_redraws_in_place():
@@ -454,8 +504,8 @@ def test_tty_output_is_throttled_and_cleared_before_the_final_line(capsys):
         out(_running(StageName.LLM, i / 10, f"window {i}/10"))
     out(StageEvent(StageName.LLM, StageStatus.DONE, elapsed=0.5))
     written = capsys.readouterr().out
-    assert written.count("\r[3/5] llm") == 5
-    assert written.endswith("\r\x1b[K[3/5] llm         done      0.5s\n")
+    assert written.count("\r[3/6] llm") == 5
+    assert written.endswith("\r\x1b[K[3/6] llm         done      0.5s\n")
 
 
 def test_speakers_flags(fake, video, jobs_dir):

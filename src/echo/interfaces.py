@@ -25,6 +25,7 @@ from echo.config import (
 from echo.job import Job
 from echo.models import (
     ClipSpec,
+    Score,
     Speakers,
     SpeakerTurn,
     StageName,
@@ -114,6 +115,19 @@ class TopicExtractor(Protocol):
 class TopicMerger(Protocol):
     def __call__(self, per_window: list[list[Topic]]) -> list[Topic]:
         """Deduplicate topics across overlapping windows; return them sorted by start_segment."""
+        ...
+
+
+# --- stage: score (optional, #21) ----------------------------------------------------
+
+
+class ClipScorer(Protocol):
+    def score(self, clips: list[str]) -> list[Score]:
+        """One ``Score`` per clip transcript text, in the same order. The LLM refers to
+        clips by their index in ``clips``, never by text or time.
+
+        Retries on invalid output, then raises TopicExtractionError.
+        """
         ...
 
 

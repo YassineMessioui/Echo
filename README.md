@@ -38,7 +38,8 @@ flowchart LR
     direction LR
     C["chunk"] --> E["extract"] --> M["merge"]
   end
-  M -->|"topics.json"| R["refine"]
+  M -->|"topics.json"| S["score"]
+  S -->|"scores.json"| R["refine"]
   T -.->|"transcript.json"| R
   R -->|"clips.json"| K["clip"]
   D -.->|"speakers.json"| K
@@ -48,6 +49,7 @@ flowchart LR
 
 - **The LLM returns segment ids, never timestamps.** It sees numbered transcript lines and answers with `start_segment`/`end_segment`; refine turns those into times from the transcript. A model can't invent a timestamp, and every clip starts and ends on a segment boundary.
 - **Retries:** an answer that isn't valid JSON or uses ids outside its window is sent back to the LLM with the error, up to `llm.max_retries` (2) times. Temporary provider errors (HTTP 429, 502, 503, 504, honouring `Retry-After`) are retried with backoff, so free-tier "high demand" errors don't fail the run. A bad key or unknown model fails at once, with a clear message.
+- **Scoring** (#21): one LLM call (a few for a small model) rates every topic as a clip, on the text the clip would contain: **hook** (does the first line stop a scroll?), **payoff**, **standalone clarity** and **energy**, 0–10 each, with a one-line reason. Clips are numbered, so the answer refers to ids, and it gets the same retries. `overall` is a weighted mean (hook and payoff 0.3, clarity 0.25, energy 0.15) computed by Echo. Changing the LLM or `--max-duration` re-scores without re-extracting topics.
 - **Chunking:** long transcripts are split into overlapping windows (5 segments of overlap). The window size follows the model: 3k tokens for Ollama, 12k for long-context hosted models (bigger windows lost topics and misplaced spans in our tests, see [docs/llm-providers.md](docs/llm-providers.md)). Windows are extracted in parallel and topics found in several windows are merged by span overlap.
 - **Links:** only the audio is downloaded; the clip stage reads just each clip's section of the video from the site (#75). On a 68-min podcast that's ~67 MB before transcription starts instead of ~240 MB.
 - **Captions:** a few words at a time, the spoken word highlighted, in a bundled font (Montserrat ExtraBold). With `--speakers`, each speaker gets their own colour and a line never mixes speakers (#68).
@@ -77,7 +79,7 @@ flowchart LR
 - Measured and closed: cutting clips in parallel (#57); ffmpeg already keeps the cores busy
 
 **Next**
-- [ ] Clip scoring: keep only the most engaging moments (#21)
+- [x] Clip scoring: `--max-clips` keeps the most engaging moments (#21)
 - [ ] Smart reframing that follows the speaker (#16)
 - [ ] Publishing to YouTube Shorts, TikTok, Instagram Reels and Facebook Reels, with titles, hashtags, a review step and scheduling (epic #67)
 - [ ] Web UI, job queue, S3 storage (#19, #20, #23)
@@ -124,7 +126,8 @@ Echo/
 │   │   ├── chunking.py  #   overlapping windows, size per model (#6, #63)
 │   │   ├── client.py, hosted.py  #   Ollama + hosted LLM clients, retries (#7, #56)
 │   │   ├── prompts.py, topics.py   #   topic extraction (#8)
-│   │   └── merge.py     #   parallel windows, merge, LLM stage (#9, #56)
+│   │   ├── merge.py     #   parallel windows, merge, LLM stage (#9, #56)
+│   │   └── scoring.py   #   clip scoring, score stage → scores.json (#21)
 │   ├── refine.py        # topics → clips.json, 15–60 s (#10, #62)
 │   ├── clip.py, reframe.py  # clips/<nn>-<slug>.mp4, 9:16 (#11, #26)
 │   ├── captions.py      # word-highlighted, per-speaker captions (#17, #68)
@@ -203,7 +206,7 @@ The CLI is called `echo-clips` because `echo` clashes with the shell builtin:
 uv run echo-clips run episode.mp4                          # → jobs/<job_id>/clips/*.mp4
 uv run echo-clips run "https://youtu.be/VIDEO_ID" --llm-provider gemini   # a link
 uv run echo-clips run "https://youtu.be/VIDEO_ID" --llm-provider gemini --speakers  # colour per speaker
-uv run echo-clips run episode.mp4 --max-clips 5            # keep at most 5 clips
+uv run echo-clips run episode.mp4 --max-clips 5            # keep the 5 best-scored clips
 uv run echo-clips run episode.mp4 --range 10%:90%          # skip intro and outro
 uv run echo-clips run episode.mp4 --job-id ep42            # name the job; re-run to resume it
 uv run echo-clips run episode.mp4 --job-id ep42 --from-stage refine --max-duration 45
@@ -218,6 +221,7 @@ Put quotes around links: they contain `?` and `&`, which the shell would otherwi
 - **Clips** are **9:16 at 1080×1920** by default. `--aspect source` keeps the source framing; `--crop-x` moves the crop window (0 = left, 1 = right).
 - **`--speakers`** detects who speaks when (about 5 min of CPU per hour of audio, so it's off by default) and gives each speaker's captions their own colour. `--num-speakers N` fixes the count.
 - **`--range`** only processes part of the video; clips keep original-video times. It's opt-in: in our tests about a third of the best clips sat outside 15–85 %.
+- **Scoring** (on by default, `--no-score` to skip): the clips are listed best first with a score and a reason, and `--max-clips N` keeps the N best.
 - **Re-running a job** skips the stages that are done; changed settings re-run what they affect. `--force` redoes every stage; `--from-stage <name>` redoes that stage and everything after it.
 - **Progress:** long stages show a live line (`[2/5] transcribe   42%  12:30 / 58:10`); Ctrl+C stops at once.
 - Every option and its default: [docs/cli.md](docs/cli.md).
@@ -236,6 +240,7 @@ jobs/<job_id>/
 ├── transcript.json        # transcribe
 ├── speakers.json          # diarize (only with --speakers)
 ├── topics.json            # llm
+├── scores.json            # score: topics.json with an engagement score per topic
 ├── clips.json             # refine
 ├── clips/
 │   ├── 01-<slug>.mp4      # clip, one per entry in clips.json
@@ -279,6 +284,20 @@ The JSON files are the Pydantic models in [`echo.models`](src/echo/models.py); l
     "summary": "How even small sleep losses hurt focus and reaction time.",
     "start_segment": 4,
     "end_segment": 7
+  }
+]
+```
+
+**`scores.json`** (`list[Topic]`, #21): the topics of `topics.json`, same order and spans, with `score` set: each criterion 0–10, and `overall`, the weighted mean that `--max-clips` ranks by. `topics.json` itself has no `score`.
+
+```json
+[
+  {
+    "title": "Sleep and productivity",
+    "summary": "How even small sleep losses hurt focus and reaction time.",
+    "start_segment": 4,
+    "end_segment": 7,
+    "score": { "overall": 7.6, "hook": 8, "payoff": 8, "clarity": 8, "energy": 6, "reason": "Opens on a relatable claim and lands a concrete takeaway." }
   }
 ]
 ```
@@ -375,7 +394,7 @@ publish:
 - Who owns the source videos? We need a rights and permissions policy before posting content we didn't create.
 - Is this a CLI tool for ourselves, or a SaaS with user accounts?
 - Which LLM gives the best topic boundaries? So far: Groq's `openai/gpt-oss-120b` found exactly the right three topics on a 2-minute test podcast, and Gemini's free `gemini-flash-lite-latest` works on hour-long episodes (its free tier is often overloaded; Echo retries). Still to compare on more real episodes, and locally with Ollama.
-- How many clips should an episode give? A 68-min podcast gave 21; clip scoring (#21) should pick the best few.
+- How many clips should an episode give? A 68-min podcast gave 21; with clip scoring (#21), `--max-clips 5` keeps the best five. Is the LLM's taste good enough to post without a review?
 
 ## License
 

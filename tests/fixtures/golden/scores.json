@@ -1,0 +1,30 @@
+[
+  {
+    "title": "Solar power is now the cheapest electricity",
+    "summary": "Why falling solar costs are reshaping new power generation in Europe.",
+    "start_segment": 1,
+    "end_segment": 3,
+    "score": {
+      "overall": 6.2,
+      "hook": 6.0,
+      "payoff": 7.0,
+      "clarity": 7.0,
+      "energy": 4.0,
+      "reason": "Clear, surprising fact, but a flat delivery."
+    }
+  },
+  {
+    "title": "Sleep and productivity",
+    "summary": "How even small sleep losses hurt focus and reaction time.",
+    "start_segment": 4,
+    "end_segment": 7,
+    "score": {
+      "overall": 7.6,
+      "hook": 8.0,
+      "payoff": 8.0,
+      "clarity": 8.0,
+      "energy": 6.0,
+      "reason": "Opens on a relatable claim and lands a concrete takeaway."
+    }
+  }
+]

@@ -12,7 +12,8 @@ from echo.errors import EchoError, LLMError
 from echo.ingest import IngestStage
 from echo.job import Job
 from echo.llm.merge import LLMStage
-from echo.llm.prompts import PROMPT_VERSION
+from echo.llm.prompts import PROMPT_VERSION, SCORE_PROMPT_VERSION
+from echo.llm.scoring import ScoreStage
 from echo.models import StageName, StageStatus
 from echo.pipeline import PipelineError, StageEvent, build_stages, run_pipeline
 from echo.refine import RefineStage
@@ -103,7 +104,7 @@ def test_from_stage_reruns_that_stage_and_later_ones(job: Job) -> None:
     run_pipeline(job, fake_stages(log), CONFIG)
     log.clear()
     meta = run_pipeline(job, fake_stages(log), CONFIG, from_stage=StageName.LLM)
-    assert log == [StageName.LLM, StageName.REFINE, StageName.CLIP]
+    assert log == [StageName.LLM, StageName.SCORE, StageName.REFINE, StageName.CLIP]
     assert meta.stages[StageName.INGEST].status == StageStatus.SKIPPED
     assert meta.stages[StageName.TRANSCRIBE].status == StageStatus.SKIPPED
     assert meta.stages[StageName.LLM].status == StageStatus.DONE
@@ -254,6 +255,7 @@ def test_rerun_after_failure_resumes_at_failed_stage(job: Job) -> None:
         StageName.TRANSCRIBE: StageStatus.SKIPPED,
         StageName.DIARIZE: StageStatus.SKIPPED,
         StageName.LLM: StageStatus.SKIPPED,
+        StageName.SCORE: StageStatus.SKIPPED,
         StageName.REFINE: StageStatus.DONE,
         StageName.CLIP: StageStatus.DONE,
     }
@@ -274,12 +276,17 @@ def test_build_stages_is_lazy(monkeypatch: pytest.MonkeyPatch, job: Job) -> None
 
     stages = build_stages(PipelineConfig(llm={"provider": "groq"}))  # no API key needed yet
 
-    # Diarization is optional and off by default, so it isn't built (#22).
+    # Diarization is optional and off by default, so it isn't built (#22); scoring (#21)
+    # is on by default.
     assert [s.name for s in stages] == [n for n in StageName if n is not StageName.DIARIZE]
+    assert StageName.SCORE not in [
+        s.name for s in build_stages(PipelineConfig(score={"enabled": False}))
+    ]
     assert [type(s) for s in stages] == [
         IngestStage,
         TranscribeStage,
         LLMStage,
+        ScoreStage,
         RefineStage,
         ClipStage,
     ]
@@ -302,18 +309,21 @@ def test_build_stages_creates_resources_when_run(
     client = FakeLLMClient(['{"topics": []}'] * 100)
     monkeypatch.setattr(pipeline, "WhisperTranscriber", lambda config: FakeTranscriber(transcript))
     monkeypatch.setattr(pipeline, "make_llm_client", lambda config: client)
-    _, transcribe, llm, _, _ = build_stages(CONFIG)
+    _, transcribe, llm, score, _, _ = build_stages(CONFIG)
 
     job_copy.audio_path.write_bytes(b"")
     transcribe.run(job_copy, CONFIG)
     llm.run(job_copy, CONFIG)
+    score.run(job_copy, CONFIG)
 
     assert client.calls
     assert job_copy.read_topics() == []
+    assert job_copy.read_scores() == []
     models = job_copy.read_meta().models
     assert models["whisper"] == "fake/whisper"
     assert models["llm"] == "fake/llm"
     assert models["llm_prompt"] == PROMPT_VERSION
+    assert models["score_prompt"] == SCORE_PROMPT_VERSION
 
 
 def test_a_stage_that_reruns_forces_later_stages(job: Job) -> None:
@@ -323,7 +333,7 @@ def test_a_stage_that_reruns_forces_later_stages(job: Job) -> None:
     (job.root / f"{StageName.LLM}.out").unlink()
     log.clear()
     run_pipeline(job, fake_stages(log), CONFIG)
-    assert log == [StageName.LLM, StageName.REFINE, StageName.CLIP]
+    assert log == [StageName.LLM, StageName.SCORE, StageName.REFINE, StageName.CLIP]
     assert statuses(job)[StageName.TRANSCRIBE] == StageStatus.SKIPPED
 
 
