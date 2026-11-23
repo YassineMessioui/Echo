@@ -106,11 +106,30 @@ class TranscriptWindow(_Artifact):
 # --- topics.json (stage: llm) ---------------------------------------------------
 
 
+class Score(_Artifact):
+    """How well a topic works as a standalone short clip (#21), each criterion 0–10.
+
+    Set by the score stage from the clip's own transcript text. ``overall`` is the
+    weighted mean the stage ranks by (``echo.llm.scoring``); ``reason`` is the LLM's
+    one-line justification.
+    """
+
+    overall: float = Field(ge=0, le=10)
+    hook: float = Field(ge=0, le=10, description="Does the first line grab attention?")
+    payoff: float = Field(ge=0, le=10, description="Insight, punchline or resolution.")
+    clarity: float = Field(ge=0, le=10, description="Understandable without context.")
+    energy: float = Field(ge=0, le=10, description="Delivery: emotion, pace, stakes.")
+    reason: str = ""
+
+
 class Topic(_Artifact):
     title: str = Field(min_length=1)
     summary: str
     start_segment: int = Field(ge=0)
     end_segment: int = Field(ge=0)
+    score: Score | None = None
+    """Engagement score (#21): set in ``scores.json`` by the score stage; None in
+    ``topics.json`` and when scoring is off (old jobs load unchanged)."""
 
     @model_validator(mode="after")
     def _ordered(self) -> Topic:
@@ -204,6 +223,8 @@ class StageName(StrEnum):
     DIARIZE = "diarize"
     """Optional (#22): only part of a run when ``DiarizeConfig.enabled``."""
     LLM = "llm"
+    SCORE = "score"
+    """Optional (#21): only part of a run when ``ScoreConfig.enabled``."""
     REFINE = "refine"
     CLIP = "clip"
 

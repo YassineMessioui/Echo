@@ -10,8 +10,10 @@ flowchart LR
   V[input.mp4] -->|AudioExtractor| A[audio.wav]
   A -->|Transcriber| T[transcript.json]
   T -->|Chunker → TopicExtractor + LLMClient → TopicMerger| P[topics.json]
+  P -->|ClipScorer, optional| S[scores.json]
   T --> R
   P -->|BoundaryRefiner| R[clips.json]
+  S -.-> R
   V --> C
   R -->|Clipper| C[clips/nn-slug.mp4]
 ```
@@ -25,6 +27,7 @@ flowchart LR
 | #8 | llm | `echo/llm/topics.py` | `TopicExtractor` | `TranscriptWindow` | `list[Topic]` (ids inside window) |
 | #9 | llm | `echo/llm/merge.py` | `TopicMerger` | `list[list[Topic]]` | `list[Topic]` → `topics.json` |
 | #22 | diarize (optional) | `echo/diarize.py` | `Diarizer` | `audio.wav`, `transcript.json` (offset) | `Speakers` → `speakers.json` |
+| #106 | score (optional) | `echo/llm/scoring.py` | `ClipScorer` | `transcript.json`, `topics.json` | `list[Topic]` with `score` → `scores.json` |
 | #10 | refine | `echo/refine.py` | `BoundaryRefiner` | `Transcript`, `list[Topic]` | `list[ClipSpec]` → `clips.json` |
 | #11 | clip | `echo/clip.py` | `Clipper` | `input.mp4` (or a `RemoteVideo` for links), `list[ClipSpec]` | `clips/<nn>-<slug>.mp4` |
 | #12 | orchestration | `echo/pipeline.py` | `Stage` adapters + runner | `Job` | `job.json` |
@@ -40,7 +43,8 @@ flowchart LR
 - **Raise `echo.errors` exceptions** for expected failures (bad input, missing
   ffmpeg, LLM down). Anything else is treated as a bug.
 - **Develop against the golden fixtures.** `tests/fixtures/golden/` holds one
-  consistent fake episode (`transcript.json` → `topics.json` → `clips.json`). The
+  consistent fake episode (`transcript.json` → `topics.json` → `scores.json` →
+  `clips.json`). The
   `golden_job` / `job_copy` pytest fixtures load it. Use `echo.testing.FakeLLMClient`
   and `FakeTranscriber` instead of real models in unit tests.
 - **Config:** each layer reads only its own section of `echo.config.PipelineConfig`.
