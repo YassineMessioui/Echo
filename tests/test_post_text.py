@@ -405,3 +405,111 @@ def test_retry_mentions_the_missing_context():
     w = writer(bad, good)
     assert w.write([ClipText("t", "", "x")])[0].hashtags == ["gta6", "a", "b"]
     assert "context hashtags (gta6)" in w.client.calls[1].prompt
+
+
+# --- frames for vision models (#129, posts-v4) ----------------------------------------------
+
+
+def test_frames_are_sent_as_numbered_images():
+    w = writer(answer(entry(0), entry(1), entry(2)))
+    clips = [
+        ClipText("Cutscene", "", "Just tell me the truth!", frame=b"jpeg-a"),
+        ClipText("No frame", "", "words"),
+        ClipText("Map", "", "where is my car", frame=b"jpeg-b"),
+    ]
+    assert len(w.write(clips)) == 3
+    (call,) = w.client.calls
+    assert call.images == (b"jpeg-a", b"jpeg-b")
+    assert "[0] Topic: Cutscene.\nOn screen: image 1\nSaid:" in call.prompt
+    assert "[1] Topic: No frame.\nSaid:" in call.prompt
+    assert "[2] Topic: Map.\nOn screen: image 2\nSaid:" in call.prompt
+    assert "a cutscene shows the game's characters" in call.system
+
+
+def test_a_model_without_vision_falls_back_to_text_once():
+    class TextOnly(FakeLLMClient):
+        def complete(self, system, prompt, *, json_schema=None, images=()):
+            if images:
+                self.calls.append(None)
+                raise LLMError("model does not support image input")
+            return super().complete(system, prompt, json_schema=json_schema)
+
+    client = TextOnly([answer(entry(0)), answer(entry(0))])
+    w = LLMPostWriter(client, LLMConfig())
+    framed = [ClipText("t", "", "x", frame=b"jpeg")]
+    assert w.write(framed)[0].title == "A good title"
+    assert w.vision is False and "image input" in w.vision_error
+    assert "On screen" not in client.calls[1].prompt
+    w.write(framed)  # no second try with images
+    assert client.calls[2] is not None and client.calls[2].images == ()
+
+
+def test_vision_off_sends_no_images():
+    w = LLMPostWriter(FakeLLMClient([answer(entry(0))]), LLMConfig(), vision=False)
+    w.write([ClipText("t", "", "x", frame=b"jpeg")])
+    assert w.client.calls[0].images == ()
+
+
+def test_batches_cap_the_images_per_call():
+    from echo.publish.text import MAX_IMAGES
+
+    clips = [ClipText("t", "", "x", frame=b"j") for _ in range(MAX_IMAGES * 2 + 1)]
+    groups = batches(clips, 1_000_000)
+    assert [len(g) for g in groups] == [MAX_IMAGES, MAX_IMAGES, 1]
+    assert batches([ClipText("t", "", "x")] * 12, 1_000_000) == [range(0, 12)]
+
+
+def test_thinking_before_the_answer_is_ignored():
+    raw = "<think>Clip 0 is a cutscene with Lucia.</think>\n" + answer(entry(0))
+    assert parse_posts(raw, 1)[0].title == "A good title"
+
+
+@pytest.mark.ffmpeg
+def test_clip_frame_is_two_moments_side_by_side(tmp_path, make_video):
+    from echo.publish.text import clip_frame
+
+    video = make_video(duration=4.0, size="1080x1920", audio=False)
+    jpeg = clip_frame(video, 4.0)
+    assert jpeg is not None and jpeg[:2] == b"\xff\xd8"
+    out = tmp_path / "f.jpg"
+    out.write_bytes(jpeg)
+    from echo.ffmpeg import probe
+
+    assert probe(out).frame_size == (576, 512)
+    assert clip_frame(tmp_path / "missing.mp4", 4.0) is None
+
+
+def test_update_posts_sends_frames_of_the_cut_clips(job_copy: Job, monkeypatch):
+    import echo.publish.text as text_module
+
+    seen: list[str] = []
+    monkeypatch.setattr(
+        text_module, "clip_frame", lambda path, d: seen.append(path.name) or b"jpeg"
+    )
+    w = writer(answer(entry(0), entry(1)))
+    update_posts(job_copy, w, CHUNK)
+    assert seen == [SOLAR, SLEEP]
+    assert w.client.calls[0].images == (b"jpeg", b"jpeg")
+    seen.clear()
+    w = LLMPostWriter(FakeLLMClient([answer(entry(0), entry(1))]), LLMConfig(), vision=False)
+    update_posts(job_copy, w, CHUNK, regenerate=True)
+    assert seen == []
+
+
+def test_a_too_large_request_is_split_not_given_up():
+    """Groq's free tier caps a request at 7000 input tokens: with frames, three clips can
+    be too much at once. The batch is split (still with frames), and vision stays on."""
+
+    class Capped(FakeLLMClient):
+        def complete(self, system, prompt, *, json_schema=None, images=()):
+            if len(images) > 1:
+                self.calls.append(None)
+                raise LLMError("groq returned HTTP 413: Request too large for model")
+            return super().complete(system, prompt, json_schema=json_schema, images=images)
+
+    client = Capped([answer(entry(0)), answer(entry(0)), answer(entry(0))])
+    w = LLMPostWriter(client, LLMConfig())
+    framed = [ClipText(f"t{i}", "", "x", frame=b"jpeg") for i in range(3)]
+    assert len(w.write(framed)) == 3
+    assert w.vision is True and w.vision_error is None
+    assert [c.images for c in client.calls if c is not None] == [(b"jpeg",)] * 3
