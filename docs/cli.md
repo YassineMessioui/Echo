@@ -142,6 +142,10 @@ A bad request (unknown clip, two decisions for one clip, a title over 100 charac
 2 approved, 1 pending, 0 rejected
 ```
 
+## `echo-clips auth youtube` and `echo-clips publish JOB` (#103)
+
+Sign in once, then post the approved clips: see [publishing.md](publishing.md). `publish` takes `--platform youtube` (the only one so far), `--clips 1,3` (each must be approved) and `--privacy private|unlisted|public` (default `private`). It exits with 1 if any clip failed; results are saved as they come.
+
 ## Exit codes
 
 | Code | Meaning |
