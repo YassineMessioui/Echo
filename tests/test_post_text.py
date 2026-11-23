@@ -298,3 +298,37 @@ def test_output_never_crashes_on_unencodable_text():
     stream.write("re‑positioning \U0001f525")
     stream.flush()
     assert buffer.getvalue() == b"re?positioning ?"
+
+
+# --- source context (posts-v2) ------------------------------------------------------------
+
+
+def test_the_prompt_names_the_source_video(job_copy: Job):
+    """A link job's title and channel tell the LLM what the clips are (the game, the
+    creator), so titles and hashtags can say so."""
+    from echo.publish.text import source_of
+
+    meta = job_copy.read_meta()
+    meta.source_info = {"title": "PLAYING GTA 6 EARLY ACCESS", "uploader": "IShowSpeed"}
+    job_copy.write_meta(meta)
+    assert source_of(job_copy) == '"PLAYING GTA 6 EARLY ACCESS" by IShowSpeed'
+    w = writer(answer(entry(0), entry(1)))
+    update_posts(job_copy, w, CHUNK)
+    assert 'Source video: "PLAYING GTA 6 EARLY ACCESS" by IShowSpeed' in w.client.calls[0].prompt
+    assert "the game, show or creator" in w.client.calls[0].system
+
+
+def test_a_local_job_names_its_file(job_copy: Job):
+    from echo.publish.text import source_of
+
+    meta = job_copy.read_meta()
+    meta.source = "/videos/My Podcast Ep 42.mp4"
+    meta.source_info = {}
+    job_copy.write_meta(meta)
+    assert source_of(job_copy) == 'a video file named "My Podcast Ep 42"'
+
+
+def test_no_source_no_intro():
+    w = writer(answer(entry(0)))
+    w.write([ClipText("t", "", "x")])
+    assert w.client.calls[0].prompt.startswith("Clips 0 to 0:")
