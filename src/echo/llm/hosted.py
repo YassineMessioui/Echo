@@ -12,12 +12,13 @@ the provider's own variable (e.g. ``GROQ_API_KEY``).
 
 from __future__ import annotations
 
+import base64
 import logging
 import math
 import os
 import random
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -187,13 +188,18 @@ class OpenAICompatibleClient:
         )
 
     def complete(
-        self, system: str, prompt: str, *, json_schema: dict[str, Any] | None = None
+        self,
+        system: str,
+        prompt: str,
+        *,
+        json_schema: dict[str, Any] | None = None,
+        images: Sequence[bytes] = (),
     ) -> str:
         body: dict[str, Any] = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": _user_content(prompt, images)},
             ],
             "temperature": self.temperature,
         }
@@ -332,3 +338,15 @@ def _error_message(response: httpx.Response) -> str:
 def _mentions_json_mode(response: httpx.Response) -> bool:
     text = _error_message(response).lower()
     return "response_format" in text or "json" in text
+
+
+def _user_content(prompt: str, images: Sequence[bytes]) -> str | list[dict[str, Any]]:
+    """The user message: plain text, or (with ``images``) OpenAI-style content parts, the
+    text first and each JPEG as a data URL."""
+    if not images:
+        return prompt
+    parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for image in images:
+        data = base64.b64encode(image).decode()
+        parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{data}"}})
+    return parts

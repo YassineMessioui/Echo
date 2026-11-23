@@ -100,3 +100,20 @@ def test_make_llm_client():
     assert isinstance(make_llm_client(LLMConfig()), OllamaClient)
     with pytest.raises(LLMError, match="unknown LLM provider"):
         make_llm_client(LLMConfig(provider="nope"))
+
+
+def test_images_go_in_the_user_message():
+    """#129: Ollama takes base64 images on the message (vision models like llava)."""
+    client, seen = _client(lambda r: _ok("ok"))
+    assert client.complete("sys", "describe", images=[b"\xff\xd8one"]) == "ok"
+    user = json.loads(seen[0].content)["messages"][1]
+    assert user == {"role": "user", "content": "describe", "images": ["/9hvbmU="]}
+
+
+def test_fake_client_records_images():
+    from echo.testing import FakeLLMClient
+
+    fake = FakeLLMClient(["a", "b"])
+    fake.complete("s", "p", images=[b"x"])
+    fake.complete("s", "p")
+    assert [c.images for c in fake.calls] == [(b"x",), ()]

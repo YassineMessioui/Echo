@@ -368,6 +368,13 @@ def test_diarize_and_speaker_caption_config():
     assert PipelineConfig().diarize.enabled is False
     with pytest.raises(ValidationError):
         DiarizeConfig(num_speakers=0)
+    # #119: estimating the count, with a second pass on mean voices and tiny speakers folded
+    d = DiarizeConfig()
+    assert (d.threshold, d.merge_threshold, d.min_speaker_share) == (0.8, 0.3, 0.02)
+    assert DiarizeConfig(merge_threshold=0, min_speaker_share=0).min_speaker_share == 0
+    for bad in ({"min_speaker_share": 1}, {"min_speaker_share": -0.1}, {"merge_threshold": -1}):
+        with pytest.raises(ValidationError):
+            DiarizeConfig(**bad)
     assert CaptionConfig().speaker_colours[0] == "#FFFFFF"
     with pytest.raises(ValidationError):
         CaptionConfig(speaker_colours=[])

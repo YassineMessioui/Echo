@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import wave
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -59,7 +60,12 @@ class SectionLLM(FakeLLMClient):
         self.sections = sections
 
     def complete(
-        self, system: str, prompt: str, *, json_schema: dict[str, Any] | None = None
+        self,
+        system: str,
+        prompt: str,
+        *,
+        json_schema: dict[str, Any] | None = None,
+        images: Sequence[bytes] = (),
     ) -> str:
         self._responses.append(self.answer(prompt, system))
         return super().complete(system, prompt, json_schema=json_schema)

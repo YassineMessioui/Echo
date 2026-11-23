@@ -220,7 +220,7 @@ Put quotes around links: they contain `?` and `&`, which the shell would otherwi
 
 - **Links** (YouTube, Vimeo, …): only the audio is downloaded; clips are read straight from the site. Running the same link again resumes its job. Only clip videos you have the rights to use (see Open questions).
 - **Clips** are **9:16 at 1080×1920** by default. `--aspect source` keeps the source framing; `--crop-x` moves the crop window (0 = left, 1 = right). `--reframe face` centres it on the people in each shot instead (about 4 s more per clip), which matters for multi-camera podcasts.
-- **`--speakers`** detects who speaks when (about 5 min of CPU per hour of audio, so it's off by default) and gives each speaker's captions their own colour. `--num-speakers N` fixes the count.
+- **`--speakers`** detects who speaks when (about 5 min of CPU per hour of audio, so it's off by default) and gives each speaker's captions their own colour. The number of speakers is estimated; `--num-speakers N` fixes it.
 - **`--range`** only processes part of the video; clips keep original-video times. It's opt-in: in our tests about a third of the best clips sat outside 15–85 %.
 - **Scoring** (on by default, `--no-score` to skip): the clips are listed best first with a score and a reason, and `--max-clips N` keeps the N best.
 - **Re-running a job** skips the stages that are done; changed settings re-run what they affect. `--force` redoes every stage; `--from-stage <name>` redoes that stage and everything after it.
