@@ -1,4 +1,13 @@
-# Test fixtures are compared byte for byte: keep them LF on every OS (Windows
-# checkouts would otherwise convert them to CRLF).
-tests/fixtures/** text eol=lf
+# Text fixtures are compared byte for byte: keep them LF on every OS (Windows
+# checkouts would otherwise convert them to CRLF). Media stays binary.
 *.json text eol=lf
+tests/fixtures/**/*.txt text eol=lf
+tests/fixtures/**/*.md text eol=lf
+tests/fixtures/**/*.ass text eol=lf
+*.mp4 binary
+*.m4a binary
+*.wav binary
+*.jpg binary
+*.png binary
+*.ttf binary
+*.onnx binary
