@@ -11,6 +11,7 @@ failures.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -98,9 +99,18 @@ class LLMClient(Protocol):
     """Recorded in job.json, e.g. 'ollama/llama3.2:3b'."""
 
     def complete(
-        self, system: str, prompt: str, *, json_schema: dict[str, Any] | None = None
+        self,
+        system: str,
+        prompt: str,
+        *,
+        json_schema: dict[str, Any] | None = None,
+        images: Sequence[bytes] = (),
     ) -> str:
         """Return the raw model text. ``json_schema`` asks for structured output if supported.
+
+        ``images`` are JPEG bytes shown to the model with ``prompt`` (#129: a frame of each
+        clip, so the text can tell a game's cutscene from the streamer). Only vision models
+        accept them; others fail with LLMError.
 
         Raises LLMError.
         """
