@@ -1,0 +1,29 @@
+[
+  {
+    "clip": "01-solar-power-is-now-the-cheapest-electricity.mp4",
+    "topic_title": "Solar power is now the cheapest electricity",
+    "title": "Solar is now the cheapest power in Europe",
+    "description": "Falling solar costs are changing what gets built.\nFrom our episode on energy.",
+    "hashtags": ["solar", "energy", "podcast"],
+    "overrides": {
+      "tiktok": { "title": "Solar just got cheap" }
+    },
+    "approval": "approved",
+    "results": {
+      "youtube": {
+        "id": "dQw4w9WgXcQ",
+        "url": "https://youtube.com/shorts/dQw4w9WgXcQ",
+        "published_at": "2026-11-23T10:00:00Z",
+        "privacy": "private"
+      },
+      "tiktok": { "error": "the sign-in expired; run echo-clips publish --login tiktok" }
+    }
+  },
+  {
+    "clip": "02-sleep-and-productivity.mp4",
+    "topic_title": "Sleep and productivity",
+    "title": "One bad night costs more focus than you think",
+    "description": "Small sleep losses add up.",
+    "hashtags": ["sleep", "productivity"]
+  }
+]

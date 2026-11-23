@@ -32,6 +32,9 @@ flowchart LR
 | #11 | clip | `echo/clip.py` | `Clipper` | `input.mp4` (or a `RemoteVideo` for links), `list[ClipSpec]`, optional `Speakers` (#16) | `clips/<nn>-<slug>.mp4` |
 | #12 | orchestration | `echo/pipeline.py` | `Stage` adapters + runner | `Job` | `job.json` |
 | #13 | orchestration | `echo/cli.py` | Typer CLI | args | job directory |
+| #101 | post text (command `posts`) | `echo/publish/text.py` | `LLMPostWriter` | `clips.json`, `transcript.json`, `topics.json` | `ClipPost` text → `clips/publish.json` |
+| #102 | review (command `review`) | `echo/publish/review.py` | `ready_to_publish` (the publish gate) | `clips/publish.json` | `ClipPost.approval` / edited text → `clips/publish.json` |
+| #67 | publish (a command, not a stage) | `echo/publish/` | `Publisher` (one per `Platform`) | `clips/<nn>-<slug>.mp4`, approved `ClipPost`s | `PublishResult` → `clips/publish.json` |
 
 ## Rules
 
@@ -52,6 +55,12 @@ flowchart LR
   `probe()`), which turns failures into `ExternalToolError` / `InvalidInputError`
   with the stderr tail. In tests, generate inputs with the `make_video` fixture and
   mark tests that need the real binaries with `@pytest.mark.ffmpeg`.
+- **Publishing (#67) never happens in a pipeline run.** Only the separate `publish`
+  command posts, only clips whose `ClipPost.approval` is `approved`
+  (`PublishConfig.require_approval` can't be turned off; publishers get their posts
+  from `echo.publish.review.ready_to_publish`), and at `private` unless
+  configured otherwise. Platform credentials live in `.env` / an OAuth token cache,
+  never in config or the job directory.
 - **Re-running on changed settings:** a stage can define `settings(config) -> str | None`
   (a fingerprint of the config its outputs depend on). The orchestrator records it in
   `job.json` and re-runs the stage, and so the later ones, when it changes.

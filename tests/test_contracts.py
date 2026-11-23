@@ -1,14 +1,20 @@
+import shutil
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from echo.config import LLMConfig, PipelineConfig, RefineConfig, TranscribeConfig
+from echo.config import LLMConfig, PipelineConfig, PublishConfig, RefineConfig, TranscribeConfig
 from echo.errors import ArtifactError, InvalidInputError, LLMError
-from echo.interfaces import LLMClient
+from echo.interfaces import LLMClient, Publisher
 from echo.job import Job, slugify
 from echo.models import (
+    Approval,
+    ClipPost,
     ClipSpec,
+    Platform,
+    PostText,
+    PublishResult,
     Segment,
     StageName,
     StageStatus,
@@ -410,3 +416,115 @@ def test_old_job_json_without_score_stage_loads(golden_job: Job):
 
 def test_score_config_defaults_on():
     assert PipelineConfig().score.enabled is True
+
+
+# --- clips/publish.json (#67, #100) ----------------------------------------------------
+
+PUBLISH_FIXTURE = Path(__file__).parent / "fixtures" / "publish.json"
+
+
+def _posts_job(job_copy: Job) -> Job:
+    job_copy.clips_dir.mkdir(exist_ok=True)
+    shutil.copy(PUBLISH_FIXTURE, job_copy.publish_path)
+    return job_copy
+
+
+def test_publish_json_matches_the_golden_clips(job_copy: Job):
+    job = _posts_job(job_copy)
+    posts = job.read_posts()
+    clips = job.read_clips()
+    assert [p.clip for p in posts] == [
+        job.clip_video_path(i, c.topic_title).name for i, c in enumerate(clips, start=1)
+    ]
+    assert [p.topic_title for p in posts] == [c.topic_title for c in clips]
+
+
+def test_publish_json_defaults_and_round_trip(job_copy: Job):
+    job = _posts_job(job_copy)
+    solar, sleep = job.read_posts()
+    assert sleep.approval is Approval.PENDING and sleep.overrides == {} and sleep.results == {}
+    assert solar.published_on(Platform.YOUTUBE)
+    assert not solar.published_on(Platform.TIKTOK)  # an error result is not published
+    assert not solar.published_on(Platform.INSTAGRAM)
+    job.write_posts([solar, sleep])
+    assert job.read_posts() == [solar, sleep]
+    # Defaults are left out, so a fresh post stays short and readable for hand edits.
+    assert '"approval": "pending"' not in job.publish_path.read_text()
+
+
+def test_old_jobs_have_no_publish_json(golden_job: Job):
+    assert not golden_job.publish_path.exists()
+    with pytest.raises(ArtifactError, match="missing"):
+        golden_job.read_posts()
+
+
+def test_text_for_applies_platform_overrides(job_copy: Job):
+    solar = _posts_job(job_copy).read_posts()[0]
+    tiktok = solar.text_for(Platform.TIKTOK)
+    assert tiktok.title == "Solar just got cheap"
+    assert tiktok.description == solar.description and tiktok.hashtags == solar.hashtags
+    assert solar.text_for(Platform.YOUTUBE).title == solar.title
+    empty = solar.model_copy(update={"overrides": {Platform.YOUTUBE: PostText(hashtags=[])}})
+    assert empty.text_for(Platform.YOUTUBE).hashtags == []  # [] overrides, None inherits
+
+
+def _post(**changes) -> dict:
+    return {"clip": "01-a.mp4", "topic_title": "A", "title": "A title"} | changes
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"clip": "clips/01-a.mp4"},
+        {"clip": "..\\01-a.mp4"},
+        {"clip": "01-a.mov"},
+        {"title": ""},
+        {"title": "x" * 101},
+        {"hashtags": ["#solar"]},
+        {"hashtags": ["two words"]},
+        {"approval": "maybe"},
+        {"overrides": {"myspace": {"title": "x"}}},
+        {"results": {"youtube": {}}},
+        {"results": {"youtube": {"id": "1", "error": "and failed"}}},
+    ],
+)
+def test_clip_post_rejects_invalid_values(changes):
+    with pytest.raises(ValidationError):
+        ClipPost.model_validate(_post(**changes))
+
+
+def test_a_clip_is_listed_once(job_copy: Job):
+    post = ClipPost.model_validate(_post())
+    with pytest.raises(ArtifactError, match="twice"):
+        job_copy.write_posts([post, post])
+    job_copy.clips_dir.mkdir(exist_ok=True)
+    job_copy.publish_path.write_text(f"[{post.model_dump_json()}, {post.model_dump_json()}]")
+    with pytest.raises(ArtifactError, match="twice"):
+        job_copy.read_posts()
+
+
+def test_publish_config_is_private_opt_in_and_needs_approval():
+    config = PipelineConfig().publish
+    assert config.platforms == [] and config.privacy == "private"
+    assert config.require_approval is True
+    with pytest.raises(ValidationError):
+        PublishConfig(require_approval=False)
+    with pytest.raises(ValidationError):
+        PublishConfig(privacy="friends")
+    assert PublishConfig(platforms=["youtube"]).platforms == [Platform.YOUTUBE]
+
+
+def test_publish_is_not_a_pipeline_stage():
+    assert "publish" not in {name.value for name in StageName}
+
+
+def test_publisher_protocol_shape(tmp_path: Path):
+    class FakePublisher:
+        platform = Platform.YOUTUBE
+
+        def publish(self, video: Path, post: ClipPost, config: PublishConfig) -> PublishResult:
+            return PublishResult(id="abc", privacy=config.privacy)
+
+    publisher: Publisher = FakePublisher()
+    result = publisher.publish(tmp_path / "01-a.mp4", ClipPost(**_post()), PublishConfig())
+    assert result.ok and result.privacy == "private"
