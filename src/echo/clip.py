@@ -69,9 +69,10 @@ def _remote_input_options() -> list[str]:
     return [arg for k, v in _REMOTE_OPTIONS.items() if k in supported for arg in (f"-{k}", v)]
 
 
-def video_input_args(video: Path | RemoteVideo, start: float) -> list[str]:
-    """ffmpeg arguments that open ``video`` as input 0, seeked exactly to ``start``."""
-    seek = ["-accurate_seek", "-ss", f"{start:.3f}"]
+def video_input_args(video: Path | RemoteVideo, start: float, *, exact: bool = True) -> list[str]:
+    """ffmpeg arguments that open ``video`` as input 0, seeked exactly to ``start`` (or,
+    with ``exact=False``, to the keyframe before it: much cheaper, for sampling)."""
+    seek = ["-accurate_seek" if exact else "-noaccurate_seek", "-ss", f"{start:.3f}"]
     if not isinstance(video, RemoteVideo):
         return [*seek, "-i", str(video)]
     # -headers puts them in ffmpeg's argv (visible in the process list). That's fine:
@@ -192,6 +193,7 @@ def cut_clips(
         else:
             geometry = frame_geometry(video)
         window = crop_window(geometry[0], geometry[1], sar=geometry[2])
+    known_webcam = None
     for clip, out in zip(clips, outputs, strict=True):
         clip_filter = video_filter
         if window is not None and geometry is not None:
@@ -201,8 +203,14 @@ def cut_clips(
             if webcam:
                 started = time.monotonic()
                 box = detect_webcam(
-                    video_input_args(video, clip.start), clip.duration, *window[:2], found
+                    lambda t: video_input_args(video, t, exact=False),
+                    clip.start,
+                    clip.duration,
+                    *window[:2],
+                    found,
+                    known=known_webcam,
                 )
+                known_webcam = box or known_webcam  # a stream's webcam stays put
                 log.info("webcam search took %.1f s", time.monotonic() - started)
             if face:
                 started = time.monotonic()

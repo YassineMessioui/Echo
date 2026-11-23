@@ -21,6 +21,7 @@ from echo.webcam import (
     ExcludingDetector,
     find_webcam,
     overlay_filter,
+    webcam_box,
 )
 
 W, H = 640, 360
@@ -74,12 +75,31 @@ def test_finds_the_webcam_box_from_its_still_border():
     assert box.h == pytest.approx(h / H, abs=5 / H)
 
 
-def test_without_a_border_a_typical_webcam_shape_is_used():
+def test_the_box_is_the_still_region_even_without_a_border():
     box = find_webcam(stream_frames(border=False), Faces(lambda k: [webcam_face()]))
     assert box is not None
+    x, y, w, h = CAM
+    assert box.x == pytest.approx(x / W, abs=3 / W) and box.w == pytest.approx(w / W, abs=5 / W)
+    assert box.y == pytest.approx(y / H, abs=3 / H) and box.h == pytest.approx(h / H, abs=5 / H)
+
+
+def test_a_typical_shape_where_no_edge_is_found():
+    """Nothing moves around the face (e.g. a static HUD band): a typical webcam shape."""
     face = webcam_face()
+    box = webcam_box(face, stream_frames(still=True))
     assert box.contains(face.cx, face.cy)
     assert box.w == pytest.approx(3.4 * face.w, rel=0.05)
+    assert box.h == pytest.approx(box.w * W / H * 3 / 4, rel=0.05)
+
+
+def test_a_known_webcam_is_reused_on_a_calm_clip():
+    """Once a stream's webcam is known, a calm clip (a menu) with the same still face keeps it."""
+    known = Box(0.02, 0.4, 0.2, 0.25)
+    calm = stream_frames(still=True)
+    assert find_webcam(calm, Faces(lambda k: [webcam_face()])) is None
+    assert find_webcam(calm, Faces(lambda k: [webcam_face()]), known) == known
+    elsewhere = Face(cx=0.8, cy=0.2, w=0.05, h=0.08)
+    assert find_webcam(calm, Faces(lambda k: [elsewhere]), known) is None
 
 
 def test_a_moving_game_character_is_not_a_webcam():
