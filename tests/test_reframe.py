@@ -9,7 +9,7 @@ BLUR_1080 = (
     "split=2[bg][fg];"
     "[bg]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,boxblur=10:2,"
     "scale=1080:1920:flags=lanczos,setsar=1[back];"
-    "[fg]scale=1080:1080,setsar=1[front];"
+    "[fg]scale=1080:1080:flags=lanczos,setsar=1[front];"
     "[back][front]overlay=0:420,setsar=1"
 )
 
@@ -51,18 +51,18 @@ BLUR_1080 = (
         (
             (1080, 1080),
             ClipConfig(background="black"),
-            "scale=1080:1080,pad=1080:1920:0:420:black,setsar=1",
+            "scale=1080:1080:flags=lanczos,pad=1080:1920:0:420:black,setsar=1",
         ),
         (
             (720, 1600),
             ClipConfig(background="black"),
-            "scale=864:1920,pad=1080:1920:108:0:black,setsar=1",
+            "scale=864:1920:flags=lanczos,pad=1080:1920:108:0:black,setsar=1",
         ),
         # Odd fitted sizes are rounded down to even.
         (
             (1001, 999),
             ClipConfig(background="black"),
-            "scale=1080:1076,pad=1080:1920:0:422:black,setsar=1",
+            "scale=1080:1076:flags=lanczos,pad=1080:1920:0:422:black,setsar=1",
         ),
     ],
 )

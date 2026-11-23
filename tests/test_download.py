@@ -319,3 +319,15 @@ def test_remote_video_prefers_the_sharpest_stream_up_to_4k():
     hls = _fmt("625", 2160, "vp09.00.50.08") | {"protocol": "m3u8_native"}
     assert _picks([*formats, hls]) == "313"  # HTTPS (byte-range seeks) before HLS
     assert _picks([formats[0], hls]) == "625"  # but HLS 4K still beats 1080p
+
+
+def test_never_a_non_seekable_or_hdr_stream_over_a_good_1080p():
+    """Fragmented DASH can't be read remotely (it would force a full download), and HDR
+    would come out washed out (no tone mapping): 1080p H.264 is better than either."""
+    h264 = _fmt("137", 1080, "avc1.640028")
+    dash = _fmt("700", 2160, "vp09.00.51.08") | {"protocol": "http_dash_segments"}
+    assert _picks([h264, dash]) == "137"
+    sdr = _fmt("313", 2160, "vp09.00.51.08") | {"dynamic_range": "SDR"}
+    hdr = _fmt("337", 2160, "vp09.02.51.10") | {"dynamic_range": "HDR10"}
+    assert _picks([h264, sdr, hdr]) == "313"
+    assert _picks([h264, hdr]) == "137"

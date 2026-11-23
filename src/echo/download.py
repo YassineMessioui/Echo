@@ -43,11 +43,17 @@ AUDIO_FORMAT = "ba[ext=m4a]/ba"
 
 
 def _video_format_spec() -> str:
-    tiers = ["[height>1440][height<=2160]", "[height>1080][height<=1440]"]
+    # Above 1080p, only seekable streams (fragmented DASH would force a full download,
+    # where the 1080p fallback is read remotely) and only SDR (clips are encoded as
+    # yuv420p without tone mapping, so HDR would come out washed out).
+    tiers = [
+        "[height>1440][height<=2160][dynamic_range=?SDR]",
+        "[height>1080][height<=1440][dynamic_range=?SDR]",
+    ]
     alternatives = [
         f"bv*{tier}{extra}"
         for tier in tiers
-        for extra in ("[vcodec^=vp09][protocol=https]", "[protocol=https]", "")
+        for extra in ("[vcodec^=vp09][protocol=https]", "[protocol=https]", "[protocol^=m3u8]")
     ]
     alternatives += ["bv*[height<=1080][vcodec^=avc1]", "bv*[height<=1080]", "b[height<=2160]", "b"]
     return "/".join(alternatives)
