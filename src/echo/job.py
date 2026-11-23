@@ -8,6 +8,7 @@ jobs/<job_id>/
   speakers.json          # stage: diarize (optional, #22)
   topics.json            # stage: llm
   scores.json            # stage: score (optional, #21): topics.json with scores
+  heatmap.json           # link jobs with a "Most replayed" graph (#123)
   clips.json             # stage: refine
   clips/<nn>-<slug>.mp4  # stage: clip
   job.json               # orchestrator
@@ -27,7 +28,7 @@ from pathlib import Path
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from echo.errors import ArtifactError, InvalidInputError
-from echo.models import ClipSpec, JobMeta, Speakers, Topic, Transcript
+from echo.models import ClipSpec, JobMeta, ReplayHeatmap, Speakers, Topic, Transcript
 
 _TOPICS = TypeAdapter(list[Topic])
 _CLIPS = TypeAdapter(list[ClipSpec])
@@ -147,6 +148,12 @@ class Job:
         return self.root / "scores.json"
 
     @property
+    def heatmap_path(self) -> Path:
+        """Link jobs only, when the video has one: YouTube's "Most replayed" heatmap
+        (#123), used by the score stage. Absent for local files and young videos."""
+        return self.root / "heatmap.json"
+
+    @property
     def clips_path(self) -> Path:
         return self.root / "clips.json"
 
@@ -188,6 +195,12 @@ class Job:
 
     def write_scores(self, topics: list[Topic]) -> None:
         _atomic_write(self.scores_path, _TOPICS.dump_json(topics, indent=2))
+
+    def read_heatmap(self) -> ReplayHeatmap:
+        return self._read_model(self.heatmap_path, ReplayHeatmap)
+
+    def write_heatmap(self, heatmap: ReplayHeatmap) -> None:
+        _atomic_write(self.heatmap_path, heatmap.model_dump_json(indent=2).encode())
 
     def read_clips(self) -> list[ClipSpec]:
         return self._read_list(self.clips_path, _CLIPS)

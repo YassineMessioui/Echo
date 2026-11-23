@@ -390,6 +390,30 @@ def test_old_job_without_settings_adopts_them_without_rerunning(job: Job) -> Non
     assert job.read_meta().stages[StageName.TRANSCRIBE].settings == "small"
 
 
+@dataclass
+class JobSettingsStage(FakeStage):
+    """Fingerprints an optional input in the job (like score on ``heatmap.json``, #123)."""
+
+    def settings(self, config: PipelineConfig, job: Job) -> str:
+        return f"extra={(job.root / 'extra').exists()}"
+
+
+def test_settings_may_depend_on_the_job(job: Job) -> None:
+    log: list[StageName] = []
+    stages = fake_stages(log)
+    stages[1] = JobSettingsStage(StageName.TRANSCRIBE, log)
+    run_pipeline(job, stages, CONFIG)
+    assert job.read_meta().stages[StageName.TRANSCRIBE].settings == "extra=False"
+    log.clear()
+    run_pipeline(job, stages, CONFIG)
+    assert log == []
+
+    (job.root / "extra").write_text("")
+    run_pipeline(job, stages, CONFIG)
+    assert log == list(StageName)[1:], "the new input re-runs the stage and later ones"
+    assert job.read_meta().stages[StageName.TRANSCRIBE].settings == "extra=True"
+
+
 def test_progress_reports_become_non_decreasing_running_events(job: Job) -> None:
     from echo import progress
 

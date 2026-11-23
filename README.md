@@ -242,6 +242,7 @@ jobs/<job_id>/
 ├── speakers.json          # diarize (only with --speakers)
 ├── topics.json            # llm
 ├── scores.json            # score: topics.json with an engagement score per topic
+├── heatmap.json           # link: YouTube's "Most replayed" graph, when it has one
 ├── clips.json             # refine
 ├── clips/
 │   ├── 01-<slug>.mp4      # clip, one per entry in clips.json
@@ -276,6 +277,12 @@ The JSON files are the Pydantic models in [`echo.models`](src/echo/models.py); l
 { "turns": [{ "start": 0.0, "end": 33.9, "speaker": "S1" }, { "start": 35.4, "end": 72.5, "speaker": "S2" }] }
 ```
 
+**`heatmap.json`** (`ReplayHeatmap`, link jobs, #123): YouTube's "Most replayed" graph as yt-dlp returns it, ~100 points in original-video time, `value` 0–1 (the peak is 1). Only saved when the video has one: YouTube shows it once a video has enough views.
+
+```json
+{ "points": [{ "start": 0.0, "end": 13.96, "value": 0.81 }, { "start": 13.96, "end": 27.92, "value": 0.51 }] }
+```
+
 **`topics.json`** (`list[Topic]`): inclusive segment spans.
 
 ```json
@@ -289,7 +296,7 @@ The JSON files are the Pydantic models in [`echo.models`](src/echo/models.py); l
 ]
 ```
 
-**`scores.json`** (`list[Topic]`, #21): the topics of `topics.json`, same order and spans, with `score` set: each criterion 0–10, and `overall`, the weighted mean that `--max-clips` ranks by. `topics.json` itself has no `score`.
+**`scores.json`** (`list[Topic]`, #21): the topics of `topics.json`, same order and spans, with `score` set: each criterion 0–10, and `overall`, the weighted mean that `--max-clips` ranks by. With a `heatmap.json`, `score.replay` (0–10: 5 is the video's median, 10 its peak) is blended into `overall` with `ScoreConfig.replay_weight`; without one it's absent. `topics.json` itself has no `score`.
 
 ```json
 [
