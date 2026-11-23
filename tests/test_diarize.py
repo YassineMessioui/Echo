@@ -84,9 +84,9 @@ def test_stage_requires_audio(tmp_path: Path):
 
 def test_settings_fingerprint():
     stage = DiarizeStage(FakeDiarizer([]))
-    assert stage.settings(PipelineConfig()) == "fake/diarizer|speakers=auto|t=0.5"
+    assert stage.settings(PipelineConfig()) == "fake/diarizer|speakers=auto|t=0.8"
     config = PipelineConfig(diarize=DiarizeConfig(enabled=True, num_speakers=2))
-    assert stage.settings(config) == "fake/diarizer|speakers=2|t=0.5"
+    assert stage.settings(config) == "fake/diarizer|speakers=2|t=0.8"
 
 
 def test_build_stages_only_includes_diarize_when_enabled(monkeypatch):
