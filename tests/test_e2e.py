@@ -29,7 +29,8 @@ import pytest
 from echo.config import CaptionConfig, IngestConfig, LLMConfig, PipelineConfig, TranscribeConfig
 from echo.ffmpeg import ffmpeg, probe
 from echo.job import Job
-from echo.llm.prompts import PROMPT_VERSION
+from echo.llm.prompts import PROMPT_VERSION, SCORE_SYSTEM_PROMPT
+from echo.llm.scoring import LLMClipScorer
 from echo.llm.topics import LLMTopicExtractor
 from echo.models import StageName, StageStatus
 from echo.pipeline import StageEvent, build_stages, run_pipeline
@@ -42,6 +43,8 @@ SECTIONS = json.loads((FIXTURE_DIR / "sections.json").read_text(encoding="utf-8"
 
 # One transcript line, as rendered by ``echo.llm.chunking.format_segment``.
 _LINE = re.compile(r"^\[(\d+)\] (\d+):(\d\d):(\d\d)–(\d+):(\d\d):(\d\d) ", re.MULTILINE)
+# One clip line of a scoring prompt (``echo.llm.scoring``).
+_CLIP = re.compile(r"^\[(\d+)\] ", re.MULTILINE)
 
 
 class SectionLLM(FakeLLMClient):
@@ -58,10 +61,21 @@ class SectionLLM(FakeLLMClient):
     def complete(
         self, system: str, prompt: str, *, json_schema: dict[str, Any] | None = None
     ) -> str:
-        self._responses.append(self.answer(prompt))
+        self._responses.append(self.answer(prompt, system))
         return super().complete(system, prompt, json_schema=json_schema)
 
-    def answer(self, prompt: str) -> str:
+    def complete_score(self, prompt: str) -> str:
+        """Scoring prompts (#21): every clip gets the same middling score."""
+        ids = [int(m.group(1)) for m in _CLIP.finditer(prompt)]
+        scores = [
+            {"clip": i, "hook": 5, "payoff": 5, "clarity": 5, "energy": 5, "reason": "ok"}
+            for i in ids
+        ]
+        return json.dumps({"scores": scores})
+
+    def answer(self, prompt: str, system: str = "") -> str:
+        if system == SCORE_SYSTEM_PROMPT:
+            return self.complete_score(prompt)
         ids: dict[str, list[int]] = {}
         for m in _LINE.finditer(prompt):
             h1, m1, s1, h2, m2, s2 = (int(g) for g in m.groups()[1:])
@@ -103,11 +117,13 @@ def _job(tmp_path: Path, config: PipelineConfig) -> Job:
 
 
 def _with_llm_client(stages: list, client: FakeLLMClient, config: PipelineConfig) -> list:
-    """``stages`` with the LLM stage's extractor rebuilt around ``client``; its chunker,
+    """``stages`` with the LLM and score stages rebuilt around ``client``; the chunker,
     merger and every other stage stay as ``build_stages`` made them."""
     models = {"llm": client.model_name, "llm_prompt": PROMPT_VERSION}
 
     def swap(stage):
+        if stage.name == StageName.SCORE:
+            return replace(stage, scorer=LLMClipScorer(client, config.llm))
         if stage.name != StageName.LLM:
             return stage
         return replace(stage, extractor=LLMTopicExtractor(client, config.llm), models=models)
@@ -184,6 +200,9 @@ def test_pipeline_end_to_end(tmp_path: Path):
     # The fake answers one topic per spoken section, and each is long enough to clip.
     assert [t.title for t in topics] == [s["title"] for s in SECTIONS]
     assert [c.topic_title for c in job.read_clips()] == [s["title"] for s in SECTIONS]
+    scored = job.read_scores()
+    assert [t.title for t in scored] == [t.title for t in topics]
+    assert all(t.score is not None and t.score.overall == 5 for t in scored)
 
     calls = len(client.calls)
     _check_resume(job, stages, config)

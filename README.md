@@ -38,7 +38,8 @@ flowchart LR
     direction LR
     C["chunk"] --> E["extract"] --> M["merge"]
   end
-  M -->|"topics.json"| R["refine"]
+  M -->|"topics.json"| S["score"]
+  S -->|"scores.json"| R["refine"]
   T -.->|"transcript.json"| R
   R -->|"clips.json"| K["clip"]
   D -.->|"speakers.json"| K
@@ -48,6 +49,7 @@ flowchart LR
 
 - **The LLM returns segment ids, never timestamps.** It sees numbered transcript lines and answers with `start_segment`/`end_segment`; refine turns those into times from the transcript. A model can't invent a timestamp, and every clip starts and ends on a segment boundary.
 - **Retries:** an answer that isn't valid JSON or uses ids outside its window is sent back to the LLM with the error, up to `llm.max_retries` (2) times. Temporary provider errors (HTTP 429, 502, 503, 504, honouring `Retry-After`) are retried with backoff, so free-tier "high demand" errors don't fail the run. A bad key or unknown model fails at once, with a clear message.
+- **Scoring** (#21): one LLM call (a few for a small model) rates every topic as a clip, on the text the clip would contain: **hook** (does the first line stop a scroll?), **payoff**, **standalone clarity** and **energy**, 0–10 each, with a one-line reason. Clips are numbered, so the answer refers to ids, and it gets the same retries. `overall` is a weighted mean (hook and payoff 0.3, clarity 0.25, energy 0.15) computed by Echo. Changing the LLM or `--max-duration` re-scores without re-extracting topics.
 - **Chunking:** long transcripts are split into overlapping windows (5 segments of overlap). The window size follows the model: 3k tokens for Ollama, 12k for long-context hosted models (bigger windows lost topics and misplaced spans in our tests, see [docs/llm-providers.md](docs/llm-providers.md)). Windows are extracted in parallel and topics found in several windows are merged by span overlap.
 - **Links:** only the audio is downloaded; the clip stage reads just each clip's section of the video from the site (#75). On a 68-min podcast that's ~67 MB before transcription starts instead of ~240 MB.
 - **Captions:** a few words at a time, the spoken word highlighted, in a bundled font (Montserrat ExtraBold). With `--speakers`, each speaker gets their own colour and a line never mixes speakers (#68).
@@ -124,7 +126,8 @@ Echo/
 │   │   ├── chunking.py  #   overlapping windows, size per model (#6, #63)
 │   │   ├── client.py, hosted.py  #   Ollama + hosted LLM clients, retries (#7, #56)
 │   │   ├── prompts.py, topics.py   #   topic extraction (#8)
-│   │   └── merge.py     #   parallel windows, merge, LLM stage (#9, #56)
+│   │   ├── merge.py     #   parallel windows, merge, LLM stage (#9, #56)
+│   │   └── scoring.py   #   clip scoring, score stage → scores.json (#21)
 │   ├── refine.py        # topics → clips.json, 15–60 s (#10, #62)
 │   ├── clip.py, reframe.py  # clips/<nn>-<slug>.mp4, 9:16 (#11, #26)
 │   ├── captions.py      # word-highlighted, per-speaker captions (#17, #68)

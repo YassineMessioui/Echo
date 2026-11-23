@@ -42,9 +42,8 @@ from echo.models import StageName, StageStatus
 from echo.pipeline import StageEvent, build_stages, run_pipeline
 
 _D = PipelineConfig()
-_STAGES = [name for name in StageName if name not in (StageName.DIARIZE, StageName.SCORE)]
-"""Stage order for ``[n/N]`` when the optional stages (diarization, scoring) aren't part
-of the run."""
+_STAGES = [name for name in StageName if name is not StageName.DIARIZE]
+"""Stage order for ``[n/N]`` when diarization (optional) isn't part of the run."""
 
 
 def _choices(name: str, field: str) -> type[StrEnum]:
