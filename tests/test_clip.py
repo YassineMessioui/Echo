@@ -743,7 +743,8 @@ def test_reframe_centre_keeps_old_fingerprints(job_copy):
     config = PipelineConfig()
     ClipStage(clipper=RecordingClipper()).run(job, config)
     before = config.clip.model_dump(mode="json")
-    del before["reframe"]
+    for added in ("reframe", "webcam", "webcam_corner", "webcam_size"):  # #16, #126
+        del before[added]
     manifest = json.loads((job.clips_dir / MANIFEST).read_text())
     assert {e["config"] for e in manifest.values()} == {_sha(before)}
     caption = config.caption.model_dump(mode="json")
@@ -757,6 +758,21 @@ def test_changing_reframe_recuts(job_copy, reframe):
     job = _job_with_video(job_copy)
     ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
     config = PipelineConfig(clip=ClipConfig(reframe=reframe))
+    assert ClipStage().settings(config) != ClipStage().settings(PipelineConfig())
+    clipper = RecordingClipper()
+    ClipStage(clipper=clipper).run(job, config)
+    assert len(clipper.cut) == len(job.read_clips())
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"webcam": "off"}, {"webcam_corner": "bottom-right"}, {"webcam_size": 0.3}],
+)
+def test_changing_webcam_settings_recuts(job_copy, change):
+    """#126: the defaults keep old fingerprints; any other webcam setting re-cuts."""
+    job = _job_with_video(job_copy)
+    ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
+    config = PipelineConfig(clip=ClipConfig(**change))
     assert ClipStage().settings(config) != ClipStage().settings(PipelineConfig())
     clipper = RecordingClipper()
     ClipStage(clipper=clipper).run(job, config)

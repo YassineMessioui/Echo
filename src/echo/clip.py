@@ -225,9 +225,22 @@ def _config_data(config: ClipConfig) -> dict[str, object]:
     """``config`` as fingerprinted. Settings added later are left out while they have the
     value that reproduces the earlier output, so upgrading Echo doesn't re-cut old jobs."""
     data = config.model_dump(mode="json")
-    if data.get("reframe") == "centre":
-        del data["reframe"]  # #16: "centre" is what every clip cut before it used
+    for key, earlier in _ADDED_SETTINGS.items():
+        if data.get(key) == earlier:
+            del data[key]
     return data
+
+
+_ADDED_SETTINGS: dict[str, object] = {
+    "reframe": "centre",  # #16: what every clip cut before it used
+    # #126: "auto" finds no webcam in non-stream clips, so they come out as before;
+    # stream clips cut earlier aren't re-cut just because of the upgrade (use --force).
+    "webcam": "auto",
+    "webcam_corner": "top-left",
+    "webcam_size": 0.4,
+}
+"""Settings added after release, with the value whose fingerprint matches clips cut before
+they existed."""
 
 
 def _entry(clip: ClipSpec, config: ClipConfig, captions: str | None) -> dict[str, str]:

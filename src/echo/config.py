@@ -137,6 +137,15 @@ class ClipConfig(_Section):
       otherwise it behaves like ``"face"``).
 
     Ignored with ``aspect="source"`` and for sources that are padded instead of cropped."""
+    webcam: Literal["auto", "off"] = "auto"
+    """Streams (#126): ``"auto"`` looks for a streamer's webcam overlay (a face that stays
+    in one small spot while the gameplay changes) and, when a clip has one, keeps it in a
+    corner of the 9:16 clip, since the crop would cut it. Clips without one are unchanged.
+    Ignored with ``aspect="source"`` and for padded sources."""
+    webcam_corner: Literal["top-left", "top-right", "bottom-left", "bottom-right"] = "top-left"
+    """Where the webcam goes. Top corners stay clear of the captions."""
+    webcam_size: float = Field(default=0.4, ge=0.2, le=0.6)
+    """The webcam's width as a fraction of the clip's width (0.4 = 432 px of 1080)."""
 
 
 HexColour = Annotated[str, Field(pattern=r"^#[0-9A-Fa-f]{6}$")]
