@@ -42,11 +42,32 @@ def _even(n: float) -> int:
     return max(2, int(n) // 2 * 2)
 
 
-def _crop(width: int, height: int, crop_x: float) -> str:
+def _window(width: int, height: int) -> tuple[int, int]:
     h = _even(height)
-    w = min(_even(h * VERTICAL), _even(width))
-    x = round((width - w) * crop_x)
+    return min(_even(h * VERTICAL), _even(width)), h
+
+
+def _crop(width: int, height: int, crop_x: float, x: str | None = None) -> str:
+    w, h = _window(width, height)
+    if x is None:
+        x = str(round((width - w) * crop_x))
     return f"crop={w}:{h}:{x}:0"
+
+
+def crop_window(width: int, height: int, *, sar: float = 1.0) -> tuple[int, int, int] | None:
+    """(displayed frame width, height, crop window width) in pixels if ``video_filter``
+    crops a ``width`` x ``height`` source with pixel shape ``sar`` to 9:16, else None
+    (already 9:16, or padded). A ``crop_x_expr`` positions the window in this width."""
+    if width <= 0 or height <= 0 or sar <= 0:
+        return None
+    if abs(sar - 1) > ASPECT_TOLERANCE:
+        width, height = _even(width * sar), _even(height)
+    aspect = width / height
+    if abs(aspect - VERTICAL) <= ASPECT_TOLERANCE * VERTICAL:
+        return None
+    if aspect >= CROP_MIN_ASPECT * (1 - ASPECT_TOLERANCE):
+        return width, _even(height), _window(width, height)[0]
+    return None
 
 
 def _fit(width: int, height: int) -> tuple[int, int]:
@@ -55,13 +76,23 @@ def _fit(width: int, height: int) -> tuple[int, int]:
     return _even(width * scale), _even(height * scale)
 
 
-def video_filter(width: int, height: int, config: ClipConfig, *, sar: float = 1.0) -> str | None:
+def video_filter(
+    width: int,
+    height: int,
+    config: ClipConfig,
+    *,
+    sar: float = 1.0,
+    crop_x_expr: str | None = None,
+) -> str | None:
     """ffmpeg ``-vf`` filter that frames a ``width`` x ``height`` source as 1080x1920,
     or None when ``config.aspect == "source"`` (keep the original framing).
 
     ``width``/``height``/``sar`` describe the frames the filter receives, i.e. after
     ffmpeg's auto-rotation (``MediaInfo.frame_size`` / ``frame_sar``). Non-square pixels
     are first resampled to square ones so the framing uses the displayed shape.
+
+    ``crop_x_expr`` replaces ``config.crop_x`` when the source is cropped: the window's
+    left edge in pixels, as a number or an ffmpeg expression of ``t`` (``echo.framing``).
     """
     if config.aspect == "source":
         return None
@@ -78,7 +109,8 @@ def video_filter(width: int, height: int, config: ClipConfig, *, sar: float = 1.
     if abs(aspect - VERTICAL) <= ASPECT_TOLERANCE * VERTICAL:
         return f"{prefix}{scale},setsar=1"
     if aspect >= CROP_MIN_ASPECT * (1 - ASPECT_TOLERANCE):
-        return f"{prefix}{_crop(width, height, config.crop_x)},{scale},setsar=1"
+        crop = _crop(width, height, config.crop_x, crop_x_expr)
+        return f"{prefix}{crop},{scale},setsar=1"
 
     fit_w, fit_h = _fit(width, height)
     x, y = (out_w - fit_w) // 2, (out_h - fit_h) // 2
@@ -94,12 +126,19 @@ def video_filter(width: int, height: int, config: ClipConfig, *, sar: float = 1.
     )
 
 
-def video_filter_for(path: Path, config: ClipConfig) -> str | None:
-    """``video_filter`` for the video stream of ``path`` (probed with ffprobe)."""
-    if config.aspect == "source":
-        return None
+def frame_geometry(path: Path) -> tuple[int, int, float]:
+    """(width, height, SAR) of the frames a ``-vf`` filter receives from ``path``'s video
+    stream (probed with ffprobe). Raises InvalidInputError if it has none."""
     info = probe(path)
     size = info.frame_size
     if not info.has_video or not size or not all(size):
         raise InvalidInputError(f"no video stream: {path}")
-    return video_filter(*size, config, sar=info.frame_sar)
+    return size[0], size[1], info.frame_sar
+
+
+def video_filter_for(path: Path, config: ClipConfig) -> str | None:
+    """``video_filter`` for the video stream of ``path`` (probed with ffprobe)."""
+    if config.aspect == "source":
+        return None
+    width, height, sar = frame_geometry(path)
+    return video_filter(width, height, config, sar=sar)

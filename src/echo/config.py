@@ -126,6 +126,17 @@ class ClipConfig(_Section):
     """Fill for sources narrower than 9:16, which are padded instead of cropped."""
     crop_x: float = Field(default=0.5, ge=0.0, le=1.0)
     """Horizontal crop position for 9:16 (0 = left edge, 0.5 = centre, 1 = right edge)."""
+    reframe: Literal["centre", "face", "speaker"] = "centre"
+    """How the 9:16 crop window is placed on sources wide enough to be cropped (#16):
+
+    - ``"centre"``: fixed at ``crop_x`` for the whole clip.
+    - ``"face"``: on the faces in each shot (camera cuts are detected), falling back to
+      ``crop_x`` in shots without a face.
+    - ``"speaker"``: like ``"face"``, but in shots where the faces don't all fit, the
+      window follows whoever speaks (needs diarization, ``DiarizeConfig.enabled``;
+      otherwise it behaves like ``"face"``).
+
+    Ignored with ``aspect="source"`` and for sources that are padded instead of cropped."""
 
 
 HexColour = Annotated[str, Field(pattern=r"^#[0-9A-Fa-f]{6}$")]

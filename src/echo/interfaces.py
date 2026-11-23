@@ -30,6 +30,7 @@ from echo.models import (
     Platform,
     PublishResult,
     Score,
+    Speakers,
     SpeakerTurn,
     StageName,
     Topic,
@@ -174,11 +175,16 @@ class Clipper(Protocol):
         config: ClipConfig,
         *,
         extra_filter: str | None = None,
+        speakers: Speakers | None = None,
     ) -> None:
         """Cut ``clips[i]`` from ``video`` into ``outputs[i]`` (frame-accurate re-encode).
 
         ``extra_filter`` is a ``-vf`` filter chained *after* the framing set by ``config``
         (e.g. burned-in captions, #17), in the same encode.
+
+        ``speakers`` (who speaks when, in original-video time) lets
+        ``config.reframe == "speaker"`` follow the active speaker (#16); without it, that
+        mode frames like ``"face"``. Other modes ignore it.
 
         Raises ExternalToolError.
         """
