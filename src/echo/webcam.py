@@ -66,8 +66,10 @@ MOVING = 15.0
 """A pixel whose brightness varies more than this (std over the samples) is moving."""
 BOUNDARY = 0.5
 """A column or row of the search band is outside the webcam once this share of it moves."""
-SEARCH = (0.9, 6.0)
-"""Where the webcam's edges are searched for, in face widths from the face's centre."""
+SEARCH = (1.4, 1.1, 6.0)
+"""Where the webcam's edges are searched for, in face widths from the face's centre:
+from 1.4 sideways and 1.1 up or down (a webcam is never tighter than that around a face,
+and a streamer moving right next to their face must not look like the boundary), out to 6."""
 TYPICAL_WIDTH = 3.4
 """Webcam width in face widths when an edge can't be found (a face fills ~30 % of a
 typical webcam's width)."""
@@ -171,15 +173,15 @@ def webcam_box(face: Face, frames: Sequence[np.ndarray]) -> Box:
     h, w = frames[0].shape[:2]
     fx, fy, fw = face.cx * w, face.cy * h, max(face.w * w, 4.0)
     moving = _grey(frames).std(axis=0) > MOVING
-    near, far = SEARCH[0] * fw, SEARCH[1] * fw
+    side, vertical, far = (k * fw for k in SEARCH)
     rows = slice(max(0, int(fy - fw)), min(h, int(fy + fw) + 1))
     cols = slice(max(0, int(fx - fw)), min(w, int(fx + fw) + 1))
     by_col = moving[rows].mean(axis=0)
     by_row = moving[:, cols].mean(axis=1)
-    left = _boundary(by_col, int(fx - near), int(fx - far) - 1)
-    right = _boundary(by_col, int(fx + near), int(fx + far) + 1)
-    top = _boundary(by_row, int(fy - near), int(fy - far) - 1)
-    bottom = _boundary(by_row, int(fy + near), int(fy + far) + 1)
+    left = _boundary(by_col, int(fx - side), int(fx - far) - 1)
+    right = _boundary(by_col, int(fx + side), int(fx + far) + 1)
+    top = _boundary(by_row, int(fy - vertical), int(fy - far) - 1)
+    bottom = _boundary(by_row, int(fy + vertical), int(fy + far) + 1)
     tw = TYPICAL_WIDTH * fw
     th = tw / TYPICAL_ASPECT
     x0 = left + 1 if left is not None else fx - tw / 2
