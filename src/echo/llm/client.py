@@ -4,7 +4,8 @@ provider can be swapped: ``OllamaClient`` talks to a local Ollama server, and
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import base64
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import httpx
@@ -30,13 +31,19 @@ class OllamaClient:
         )
 
     def complete(
-        self, system: str, prompt: str, *, json_schema: dict[str, Any] | None = None
+        self,
+        system: str,
+        prompt: str,
+        *,
+        json_schema: dict[str, Any] | None = None,
+        images: Sequence[bytes] = (),
     ) -> str:
         body: dict[str, Any] = {
             "model": self.config.model,
             "messages": [
                 {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": prompt}
+                | ({"images": [base64.b64encode(i).decode() for i in images]} if images else {}),
             ],
             "stream": False,
             "options": {"temperature": self.config.temperature},
