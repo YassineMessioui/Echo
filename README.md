@@ -240,7 +240,8 @@ jobs/<job_id>/
 ├── clips/
 │   ├── 01-<slug>.mp4      # clip, one per entry in clips.json
 │   ├── 01-<slug>.ass      # its caption track (kept for inspection)
-│   └── manifest.json      # clip: fingerprints used to skip unchanged clips
+│   ├── manifest.json      # clip: fingerprints used to skip unchanged clips
+│   └── publish.json       # publish (#67): text, approval and post per clip
 └── job.json               # orchestrator: stage status, settings and models used
 ```
 
@@ -287,6 +288,23 @@ The JSON files are the Pydantic models in [`echo.models`](src/echo/models.py); l
 
 ```json
 [{ "topic_title": "Sleep and productivity", "start": 34.0, "end": 80.2, "duration": 46.2 }]
+```
+
+**`clips/publish.json`** (`list[ClipPost]`, #67): one entry per clip, written by the publishing commands, never by a run. `approval` is `pending`, `approved` or `rejected`; only approved clips are posted. `hashtags` have no `#`. `overrides` change the text on one platform, and `results` keeps the latest attempt per platform (an `id` and `url`, or an `error`). Fields at their default are left out.
+
+```json
+[
+  {
+    "clip": "01-sleep-and-productivity.mp4",
+    "topic_title": "Sleep and productivity",
+    "title": "One bad night costs more focus than you think",
+    "description": "Small sleep losses add up.",
+    "hashtags": ["sleep", "productivity"],
+    "overrides": { "tiktok": { "title": "Sleep is a cheat code" } },
+    "approval": "approved",
+    "results": { "youtube": { "id": "abc123", "url": "https://youtube.com/shorts/abc123", "published_at": "2026-11-23T10:00:00Z", "privacy": "private" } }
+  }
+]
 ```
 
 **`job.json`** (`JobMeta`): `status` is `pending`, `running`, `done`, `skipped` or `failed`; `error` is set on failure (`"interrupted"` after Ctrl+C); `settings` fingerprints the config a stage's outputs depend on, so changing it re-runs the stage. Link jobs also record `source_url` and `source_info` (title, uploader, duration).

@@ -5,6 +5,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from echo.models import Platform
+
 
 class _Section(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -164,6 +166,19 @@ class DiarizeConfig(_Section):
     """Clustering distance when estimating: lower splits into more speakers."""
 
 
+class PublishConfig(_Section):
+    """Posting approved clips (#67). Read only by the ``echo-clips publish`` command: a
+    pipeline run never posts anything."""
+
+    platforms: list[Platform] = Field(default_factory=list)
+    """Where ``publish`` posts by default (none until set: posting is always opt-in)."""
+    privacy: Literal["private", "unlisted", "public"] = "private"
+    """Visibility of new posts, where the platform has one (TikTok and Reels map
+    ``unlisted`` to their closest setting)."""
+    require_approval: Literal[True] = True
+    """Only clips approved in review (#102) are published. Fixed: it can't be turned off."""
+
+
 class PipelineConfig(_Section):
     jobs_dir: Path = Path("jobs")
     ingest: IngestConfig = IngestConfig()
@@ -174,3 +189,4 @@ class PipelineConfig(_Section):
     clip: ClipConfig = ClipConfig()
     caption: CaptionConfig = CaptionConfig()
     diarize: DiarizeConfig = DiarizeConfig()
+    publish: PublishConfig = PublishConfig()
