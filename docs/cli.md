@@ -36,6 +36,8 @@ resumes that job instead of downloading it again. YouTube needs a JavaScript run
 | `--aspect [9:16\|source]` | `9:16` | `ClipConfig.aspect` |
 | `--crop-x FLOAT` | `0.5` | `ClipConfig.crop_x` (0 = left, 1 = right) |
 | `--reframe [centre\|face\|speaker]` | `centre` | `ClipConfig.reframe`: `face` puts the 9:16 window on the faces of each shot (camera cuts are detected; `--crop-x` where there's no face). Adds ~3–4 s per clip; the face model (230 KB, MIT) downloads once to `~/.cache/echo/models`. `speaker` frames like `face` until #109 |
+| `--webcam / --no-webcam` | on | `ClipConfig.webcam`: on streams, keep the streamer's webcam overlay in a corner of the 9:16 clip (#126). It's found automatically: a small face that stays put while the gameplay around it moves, searched in all clips at once so every clip gets the same box. Clips without one are unchanged. Adds ~4 s per clip (a few single-frame seeks) |
+| `--webcam-corner [top-left\|top-right\|bottom-left\|bottom-right]` | `top-left` | `ClipConfig.webcam_corner`: the top corners stay clear of the captions; `bottom-right` sits under TikTok's and Reels' action buttons |
 | `--background [blur\|black]` | `blur` | `ClipConfig.background` |
 | `--captions / --no-captions` | on | `CaptionConfig.enabled` (burned-in, word-highlighted) |
 | `--speakers / --no-speakers` | off | `DiarizeConfig.enabled`: detect who speaks when (`speakers.json`); captions get a colour per speaker. Adds ~5 min of CPU per hour of audio; the models (~46 MB) download once to `~/.cache/echo/models` (`ECHO_MODELS_DIR`) |
@@ -97,6 +99,8 @@ error message (no traceback unless `--verbose`).
 Writes a title (at most 70 characters), a 1–3 line description and 3–5 hashtags for every clip of a finished job, into `clips/publish.json` (see the README), all `pending` review. **Nothing is posted.** `JOB` is a job directory or a job id in `--jobs-dir`.
 
 One LLM call covers as many clips as fit the model's window budget (usually the whole job on a hosted model). The LLM gets each clip's own transcript text and its topic, and invalid answers (too long, wrong hashtag count, missing clips) are sent back to it, like topic extraction.
+
+**Frames (#129):** with a hosted provider, each clip's transcript goes with **one frame of the clip** (two moments side by side, as viewers see it, including a streamer's webcam), so a vision model (e.g. Groq `qwen/qwen3.8-27b`, Gemini) can tell a game's cutscene from the streamer. Those frames are sent to the provider; `--no-frames` keeps them local (off by default with Ollama). A model that refuses images falls back to text, with a note.
 
 Running it again only writes text for clips that don't have any yet, so edits made in review are kept. `--regenerate` rewrites the text of clips still `pending`; approved and rejected clips are never touched. A post whose clip is gone after a re-run is dropped, unless it was already published.
 

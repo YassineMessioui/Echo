@@ -333,3 +333,15 @@ def test_close_ends_a_retry_wait_at_once():
     assert "cancelled" in str(errors[0])
     with pytest.raises(LLMError, match="cancelled"):
         client.complete("s", "p")
+
+
+def test_images_go_as_content_parts():
+    """#129: frames are sent OpenAI-style, the text first, each JPEG as a data URL."""
+    client, seen = _client(lambda r: _ok("ok"))
+    assert client.complete("sys", "describe", images=[b"\xff\xd8one", b"\xff\xd8two"]) == "ok"
+    user = json.loads(seen[0].content)["messages"][1]
+    assert user["role"] == "user"
+    text, first, second = user["content"]
+    assert text == {"type": "text", "text": "describe"}
+    assert first == {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9hvbmU="}}
+    assert second["image_url"]["url"] == "data:image/jpeg;base64,/9h0d28="

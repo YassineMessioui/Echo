@@ -23,7 +23,7 @@ flowchart LR
 | #4 | ingest | `echo/ingest.py` | `AudioExtractor` | `input.mp4` (or `input-audio.m4a` for links) | `audio.wav` (16 kHz mono PCM) |
 | #5 | transcribe | `echo/transcribe.py` | `Transcriber` | `audio.wav` | `Transcript` → `transcript.json` |
 | #6 | llm | `echo/llm/chunking.py` | `Chunker` | `Transcript` | `list[TranscriptWindow]` |
-| #7 | llm | `echo/llm/client.py` | `LLMClient` | system + prompt | raw text |
+| #7 | llm | `echo/llm/client.py` | `LLMClient` | system + prompt (+ optional JPEG `images`, #129) | raw text |
 | #8 | llm | `echo/llm/topics.py` | `TopicExtractor` | `TranscriptWindow` | `list[Topic]` (ids inside window) |
 | #9 | llm | `echo/llm/merge.py` | `TopicMerger` | `list[list[Topic]]` | `list[Topic]` → `topics.json` |
 | #22 | diarize (optional) | `echo/diarize.py` | `Diarizer` | `audio.wav`, `transcript.json` (offset) | `Speakers` → `speakers.json` |

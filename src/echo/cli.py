@@ -58,6 +58,8 @@ Aspect = _choices("Aspect", "aspect")
 Background = _choices("Background", "background")
 Reframe = _choices("Reframe", "reframe")
 _DEFAULT_REFRAME = Reframe(_D.clip.reframe)
+WebcamCorner = _choices("WebcamCorner", "webcam_corner")
+_DEFAULT_WEBCAM_CORNER = WebcamCorner(_D.clip.webcam_corner)
 _DEFAULT_ASPECT = Aspect(_D.clip.aspect)
 _DEFAULT_BACKGROUND = Background(_D.clip.background)
 
@@ -453,6 +455,17 @@ def run(
     background: Annotated[
         Background, typer.Option(help="Fill for sources narrower than 9:16.")
     ] = _DEFAULT_BACKGROUND,
+    webcam: Annotated[
+        bool,
+        typer.Option(
+            "--webcam/--no-webcam",
+            help="Streams: keep the streamer's webcam overlay in a corner of the clip "
+            "(found automatically; clips without one are unchanged).",
+        ),
+    ] = _D.clip.webcam == "auto",
+    webcam_corner: Annotated[
+        WebcamCorner, typer.Option(help="Where the webcam goes.")
+    ] = _DEFAULT_WEBCAM_CORNER,
     captions: Annotated[
         bool, typer.Option("--captions/--no-captions", help="Burn word-highlighted captions in.")
     ] = _D.caption.enabled,
@@ -495,6 +508,8 @@ def run(
             "crop_x": crop_x,
             "reframe": reframe.value,
             "background": background.value,
+            "webcam": "auto" if webcam else "off",
+            "webcam_corner": webcam_corner.value,
         },
         caption={"enabled": captions},
         diarize={"enabled": speakers, "num_speakers": num_speakers},
@@ -587,6 +602,17 @@ def posts(
         str, typer.Option(help="LLM provider (see docs/llm-providers.md).")
     ] = _D.llm.provider,
     llm_model: Annotated[str, typer.Option(help="LLM model name.")] = _D.llm.model,
+    frames: Annotated[
+        bool | None,
+        typer.Option(
+            "--frames/--no-frames",
+            help="Show the model a frame of each clip, so the text knows a game's cutscene "
+            "from the streamer. Needs a vision model (e.g. groq qwen/qwen3.8-27b, gemini); "
+            "frames, including a streamer's webcam, are sent to the provider. Default: on "
+            "for hosted providers, off for Ollama.",
+            show_default=False,
+        ),
+    ] = None,
     regenerate: Annotated[
         bool,
         typer.Option(
@@ -620,7 +646,11 @@ def posts(
     writer: LLMPostWriter | None = None
     try:
         the_job = _open_job(job, config.jobs_dir)
-        writer = LLMPostWriter(make_llm_client(config.llm), config.llm)
+        writer = LLMPostWriter(
+            make_llm_client(config.llm),
+            config.llm,
+            vision=frames if frames is not None else config.llm.provider != "ollama",
+        )
         update = update_posts(the_job, writer, config.chunk, regenerate=regenerate)
     except EchoError as e:
         if verbose:
@@ -634,6 +664,12 @@ def posts(
         if writer is not None:
             writer.close()
 
+    if writer is not None and writer.vision_error:
+        typer.echo(
+            f"note: {config.llm.model} can't see images, so the text was written from "
+            "the transcript only (pick a vision model for streams, see --frames)",
+            err=True,
+        )
     written = set(update.written)
     typer.echo(f"posts: {the_job.publish_path}")
     for post in update.posts:
