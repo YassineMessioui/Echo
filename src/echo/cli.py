@@ -644,3 +644,171 @@ def posts(
             typer.echo("        " + " ".join(f"#{t}" for t in post.hashtags))
     if update.dropped:
         typer.echo(f"dropped (clip gone): {', '.join(update.dropped)}")
+
+
+def _review_fail(message: str) -> typer.Exit:
+    typer.echo(f"error: {message}", err=True)
+    return typer.Exit(1)
+
+
+def _show_post(number: int, post: Any, job: Job, durations: dict[str, float]) -> None:
+    duration = durations.get(post.clip)
+    length = f"  {duration:.1f}s" if duration is not None else "  (clip gone)"
+    done = sorted(p.value for p in post.results if post.published_on(p))
+    published = f"  published: {', '.join(done)}" if done else ""
+    typer.echo(f"{number:3d} [{post.approval.value}] {post.clip}{length}{published}")
+    typer.echo(f"      {post.title}")
+    for line in post.description.splitlines():
+        typer.echo(f"      {line}")
+    if post.hashtags:
+        typer.echo("      " + " ".join(f"#{t}" for t in post.hashtags))
+    typer.echo(f"      {job.clips_dir / post.clip}")
+
+
+@app.command()
+def review(
+    job: Annotated[
+        str,
+        typer.Argument(help="The job: its directory, or its id in --jobs-dir.", show_default=False),
+    ],
+    jobs_dir: Annotated[
+        Path, typer.Option(help="Directory holding the job directories.")
+    ] = _D.jobs_dir,
+    approve: Annotated[
+        str | None,
+        typer.Option(help="Approve these clips, e.g. 1,3-5.", show_default=False),
+    ] = None,
+    reject: Annotated[
+        str | None, typer.Option(help="Reject these clips.", show_default=False)
+    ] = None,
+    reset: Annotated[
+        str | None,
+        typer.Option(help="Put these clips back to pending review.", show_default=False),
+    ] = None,
+    clip: Annotated[
+        int | None,
+        typer.Option(
+            min=1, help="The clip --title/--description/--hashtags edit.", show_default=False
+        ),
+    ] = None,
+    title: Annotated[str | None, typer.Option(help="New title.", show_default=False)] = None,
+    description: Annotated[
+        str | None,
+        typer.Option(help="New description (\\n for a new line).", show_default=False),
+    ] = None,
+    hashtags: Annotated[
+        str | None,
+        typer.Option(help="New hashtags, comma-separated (e.g. sleep,focus).", show_default=False),
+    ] = None,
+    interactive: Annotated[
+        bool,
+        typer.Option(
+            "--interactive",
+            "-i",
+            help="Go through the pending clips one by one and approve, reject or edit them.",
+        ),
+    ] = False,
+) -> None:
+    """List the clips of JOB with their post text, and approve, reject or edit them.
+
+    Only approved clips are ever published. Without options it just lists them.
+    """
+    from echo.models import Approval
+    from echo.publish.review import ReviewError, edit_text, parse_numbers, set_approval
+
+    try:
+        the_job = _open_job(job, jobs_dir)
+        if not the_job.publish_path.is_file():
+            raise _review_fail(
+                f"no post text yet for {the_job.root}; write it with: echo-clips posts {job}"
+            )
+        posts = the_job.read_posts()
+        clips = the_job.read_clips() if the_job.clips_path.is_file() else []
+    except EchoError as e:
+        raise _review_fail(str(e)) from e
+    durations = {
+        the_job.clip_video_path(i, c.topic_title).name: c.duration
+        for i, c in enumerate(clips, start=1)
+    }
+    edits = {"title": title, "description": description, "hashtags": hashtags}
+    if any(v is not None for v in edits.values()) and clip is None:
+        raise _review_fail("--title, --description and --hashtags need --clip N")
+
+    try:
+        decided: dict[int, Approval] = {}
+        for spec, approval in (
+            (approve, Approval.APPROVED),
+            (reject, Approval.REJECTED),
+            (reset, Approval.PENDING),
+        ):
+            for i in parse_numbers(spec, len(posts)) if spec is not None else []:
+                if decided.get(i, approval) is not approval:
+                    raise ReviewError(f"clip {i + 1} is given two different decisions")
+                decided[i] = approval
+        if clip is not None:
+            if clip > len(posts):
+                raise ReviewError(f"no clip {clip}: clips are numbered 1 to {len(posts)}")
+            posts[clip - 1] = edit_text(
+                posts[clip - 1],
+                title=title,
+                description=description.replace("\\n", "\n") if description else description,
+                hashtags=hashtags.split(",") if hashtags is not None else None,
+            )
+        for i, approval in decided.items():
+            posts[i] = set_approval(posts[i], approval, the_job.clips_dir)
+    except ReviewError as e:
+        raise _review_fail(str(e)) from e
+    if decided or clip is not None:
+        the_job.write_posts(posts)
+
+    if interactive:
+        _review_interactively(the_job, posts, durations)
+    for number, post in enumerate(posts, start=1):
+        _show_post(number, post, the_job, durations)
+    counts = {a: sum(p.approval is a for p in posts) for a in Approval}
+    typer.echo(
+        f"{counts[Approval.APPROVED]} approved, {counts[Approval.PENDING]} pending, "
+        f"{counts[Approval.REJECTED]} rejected"
+    )
+
+
+def _review_interactively(job: Job, posts: list[Any], durations: dict[str, float]) -> None:
+    """Ask about each pending clip; every decision is saved at once, so quitting keeps it."""
+    from echo.models import Approval
+    from echo.publish.review import ReviewError, edit_text, set_approval
+
+    for i, post in enumerate(posts):
+        if post.approval is not Approval.PENDING:
+            continue
+        while True:
+            _show_post(i + 1, posts[i], job, durations)
+            choice = (
+                typer.prompt("      [a]pprove, [r]eject, [e]dit, [s]kip, [q]uit", default="s")
+                .strip()
+                .lower()[:1]
+            )
+            try:
+                if choice == "q":
+                    return
+                if choice == "s":
+                    break
+                if choice in ("a", "r"):
+                    approval = Approval.APPROVED if choice == "a" else Approval.REJECTED
+                    posts[i] = set_approval(posts[i], approval, job.clips_dir)
+                    job.write_posts(posts)
+                    break
+                if choice == "e":
+                    current = posts[i]
+                    posts[i] = edit_text(
+                        current,
+                        title=typer.prompt("      title", default=current.title),
+                        description=typer.prompt(
+                            "      description", default=current.description.replace("\n", "\\n")
+                        ).replace("\\n", "\n"),
+                        hashtags=typer.prompt(
+                            "      hashtags", default=",".join(current.hashtags)
+                        ).split(","),
+                    )
+                    job.write_posts(posts)
+            except ReviewError as e:
+                typer.echo(f"      {e}", err=True)
