@@ -106,7 +106,7 @@ def test_enabling_diarization_on_an_existing_job_runs_it_and_later_stages(job_co
     log.clear()
     with_diarize = [*stages[:2], DiarizeStage(FakeDiarizer([_turn(0, 5, "a")])), *stages[2:]]
     run_pipeline(job, with_diarize, PipelineConfig())
-    assert log == [StageName.LLM, StageName.REFINE, StageName.CLIP]
+    assert log == [StageName.LLM, StageName.SCORE, StageName.REFINE, StageName.CLIP]
     assert job.read_speakers().labels == ["S1"]
 
 
