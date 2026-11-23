@@ -32,14 +32,16 @@ from echo.config import (
     LLMConfig,
     PipelineConfig,
     RefineConfig,
+    ScoreConfig,
     TranscribeConfig,
 )
 from echo.download import is_url, job_from_url
 from echo.errors import EchoError, ExternalToolError
 from echo.ffmpeg import has_filter
 from echo.job import Job
-from echo.models import StageName, StageStatus
+from echo.models import ClipSpec, Score, StageName, StageStatus
 from echo.pipeline import StageEvent, build_stages, run_pipeline
+from echo.refine import scored_topics
 
 _D = PipelineConfig()
 _STAGES = [name for name in StageName if name is not StageName.DIARIZE]
@@ -195,6 +197,7 @@ def _build_config(
     clip: dict[str, Any],
     caption: dict[str, Any],
     diarize: dict[str, Any] | None = None,
+    score: dict[str, Any] | None = None,
 ) -> PipelineConfig:
     """Overlay the CLI values on the defaults, validating every section.
 
@@ -215,6 +218,7 @@ def _build_config(
                 "clip": ClipConfig.model_validate(_D.clip.model_dump() | clip),
                 "caption": CaptionConfig.model_validate(_D.caption.model_dump() | caption),
                 "diarize": DiarizeConfig.model_validate(_D.diarize.model_dump() | (diarize or {})),
+                "score": ScoreConfig.model_validate(_D.score.model_dump() | (score or {})),
             }
         )
     except ValidationError as e:
@@ -405,8 +409,20 @@ def run(
     ] = _D.refine.max_duration,
     max_clips: Annotated[
         int | None,
-        typer.Option(min=1, help="Keep at most this many clips (those closest to ~37 s)."),
+        typer.Option(
+            min=1,
+            help="Keep at most this many clips: the best scored (or, with --no-score, "
+            "those closest to ~37 s).",
+        ),
     ] = _D.refine.max_clips,
+    score: Annotated[
+        bool,
+        typer.Option(
+            "--score/--no-score",
+            help="Rate each clip for hook, payoff, clarity and energy with the LLM "
+            "(one extra call), to rank clips and pick the best for --max-clips.",
+        ),
+    ] = _D.score.enabled,
     aspect: Annotated[
         Aspect, typer.Option(help="Output framing: 9:16 vertical, or keep the source framing.")
     ] = _DEFAULT_ASPECT,
@@ -468,6 +484,7 @@ def run(
         },
         caption={"enabled": captions},
         diarize={"enabled": speakers, "num_speakers": num_speakers},
+        score={"enabled": score},
     )
     _check_captions_supported(config)
 
@@ -489,7 +506,8 @@ def run(
             from_stage=from_stage,
             on_event=on_event,
         )
-        paths = clip_paths(job, job.read_clips()) if job.clips_path.is_file() else []
+        clips = job.read_clips() if job.clips_path.is_file() else []
+        scores = _clip_scores(job, config) if clips else {}
     except EchoError as e:
         if verbose:
             typer.echo(traceback.format_exc(), err=True, nl=False)
@@ -501,9 +519,34 @@ def run(
         raise typer.Exit(130) from None
 
     typer.echo(f"job: {job.root}")
-    if paths:
-        typer.echo(f"clips ({len(paths)}):")
+    _print_clips(clips, clip_paths(job, clips), scores)
+
+
+def _clip_scores(job: Job, config: PipelineConfig) -> dict[str, Score]:
+    """Each clip's score by topic title, from the topics refine used (#21); empty when
+    scoring is off or didn't run."""
+    if not config.score.enabled or not job.topics_path.is_file():
+        return {}
+    return {t.title: t.score for t in scored_topics(job, config) if t.score is not None}
+
+
+def _print_clips(clips: list[ClipSpec], paths: list[Path], scores: dict[str, Score]) -> None:
+    """The clip paths; with scores, best first, each with its score and reason."""
+    if not clips:
+        typer.echo("no clips")
+        return
+    if not scores:
+        typer.echo(f"clips ({len(clips)}):")
         for path in paths:
             typer.echo(f"  {path}")
-    else:
-        typer.echo("no clips")
+        return
+    typer.echo(f"clips ({len(clips)}, best first):")
+    rows = sorted(
+        zip(clips, paths, strict=True),
+        key=lambda row: -(s.overall if (s := scores.get(row[0].topic_title)) else -1.0),
+    )
+    for clip, path in rows:
+        score = scores.get(clip.topic_title)
+        typer.echo(f"  {score.overall:4.1f}  {path}" if score else f"     -  {path}")
+        if score and score.reason:
+            typer.echo(f"        {score.reason}")
