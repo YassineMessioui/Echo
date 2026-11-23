@@ -31,6 +31,7 @@ flowchart LR
 | #13 | orchestration | `echo/cli.py` | Typer CLI | args | job directory |
 | #101 | post text (command `posts`) | `echo/publish/text.py` | `LLMPostWriter` | `clips.json`, `transcript.json`, `topics.json` | `ClipPost` text → `clips/publish.json` |
 | #102 | review (command `review`) | `echo/publish/review.py` | `ready_to_publish` (the publish gate) | `clips/publish.json` | `ClipPost.approval` / edited text → `clips/publish.json` |
+| #103 | publish to YouTube (commands `auth`, `publish`) | `echo/publish/youtube.py`, `runner.py` | `YouTubePublisher` | approved `ClipPost`s, `clips/*.mp4` | `PublishResult` → `clips/publish.json` |
 | #67 | publish (a command, not a stage) | `echo/publish/` | `Publisher` (one per `Platform`) | `clips/<nn>-<slug>.mp4`, approved `ClipPost`s | `PublishResult` → `clips/publish.json` |
 
 ## Rules

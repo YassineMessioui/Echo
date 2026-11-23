@@ -755,3 +755,107 @@ def _review_interactively(job: Job, posts: list[Any], durations: dict[str, float
                     job.write_posts(posts)
             except ReviewError as e:
                 typer.echo(f"      {e}", err=True)
+
+
+_PUBLISHERS = {"youtube"}
+"""Platforms with a publisher so far (#103); the others come with #97 and #98."""
+
+
+def _platform_choice(platform: str) -> str:
+    if platform not in _PUBLISHERS:
+        raise _review_fail(
+            f"publishing to {platform} isn't supported yet (only: {', '.join(sorted(_PUBLISHERS))})"
+        )
+    return platform
+
+
+@app.command()
+def auth(
+    platform: Annotated[str, typer.Argument(help="Where to sign in: youtube.", show_default=False)],
+    client_secrets: Annotated[
+        Path | None,
+        typer.Option(
+            help="The OAuth client JSON downloaded from Google Cloud (saved for later runs).",
+            show_default=False,
+        ),
+    ] = None,
+) -> None:
+    """Sign in to PLATFORM once, so echo-clips publish can post there.
+
+    A browser opens on the platform's consent page. The sign-in is stored in
+    ~/.config/echo (or $ECHO_CONFIG_DIR), never in a job or the repo.
+    """
+    from echo.publish import youtube
+
+    _platform_choice(platform)
+    try:
+        if client_secrets is not None:
+            saved = youtube.install_client_secrets(client_secrets)
+            typer.echo(f"app credentials saved to {saved}")
+        path = youtube.sign_in(youtube.ClientSecrets.load())
+    except EchoError as e:
+        raise _review_fail(str(e)) from e
+    typer.echo(f"signed in to YouTube (token in {path})")
+
+
+@app.command()
+def publish(
+    job: Annotated[
+        str,
+        typer.Argument(help="The job: its directory, or its id in --jobs-dir.", show_default=False),
+    ],
+    platform: Annotated[str, typer.Option(help="Where to post: youtube.")] = "youtube",
+    jobs_dir: Annotated[
+        Path, typer.Option(help="Directory holding the job directories.")
+    ] = _D.jobs_dir,
+    clips: Annotated[
+        str | None,
+        typer.Option(
+            help="Only these clips (as numbered by review, e.g. 1,3); each must be approved.",
+            show_default=False,
+        ),
+    ] = None,
+    privacy: Annotated[str, typer.Option(help="private, unlisted or public.")] = _D.publish.privacy,
+) -> None:
+    """Post the approved clips of JOB that aren't on PLATFORM yet.
+
+    Only clips approved with echo-clips review are posted, each one at most once.
+    Results (video links or errors) are saved in clips/publish.json as they come.
+    """
+    from echo.config import PublishConfig
+    from echo.publish.review import ReviewError, parse_numbers
+    from echo.publish.runner import publish_job
+    from echo.publish.youtube import YouTubePublisher
+
+    _platform_choice(platform)
+    try:
+        config = PublishConfig(privacy=privacy)  # type: ignore[arg-type]
+    except ValidationError as e:
+        raise _review_fail(f"--privacy must be private, unlisted or public, not {privacy!r}") from e
+
+    def show(post: Any, result: Any) -> None:
+        if result.ok:
+            typer.echo(f"  posted {post.clip} ({result.privacy}): {result.url}")
+        else:
+            typer.echo(f"  failed {post.clip}: {result.error}", err=True)
+
+    publisher = YouTubePublisher()
+    try:
+        the_job = _open_job(job, jobs_dir)
+        posts = the_job.read_posts() if the_job.publish_path.is_file() else []
+        if not posts:
+            raise _review_fail("no post text yet; run echo-clips posts, then echo-clips review")
+        only = parse_numbers(clips, len(posts)) if clips is not None else None
+        done = publish_job(the_job, publisher, config, only=only, on_result=show)
+    except (EchoError, ReviewError) as e:
+        raise _review_fail(str(e)) from e
+    except KeyboardInterrupt:
+        typer.echo("interrupted (results so far are saved)", err=True)
+        raise typer.Exit(130) from None
+    finally:
+        publisher.close()
+    if not done:
+        typer.echo(f"nothing to post on {platform}: no approved clip that isn't there yet")
+    failed = sum(not r.ok for _, r in done)
+    if failed:
+        raise typer.Exit(1)
