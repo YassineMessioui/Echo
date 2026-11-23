@@ -110,7 +110,8 @@ class LLMClient(Protocol):
 
         ``images`` are JPEG bytes shown to the model with ``prompt`` (#129: a frame of each
         clip, so the text can tell a game's cutscene from the streamer). Only vision models
-        accept them; others fail with LLMError.
+        use them; others may fail with LLMError or silently ignore them, so callers must
+        not rely on an error to know whether the model saw them.
 
         Raises LLMError.
         """
