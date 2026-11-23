@@ -33,6 +33,13 @@ TITLE_MAX = 70
 """Generated titles stay short enough for every platform's feed (the contract allows 100)."""
 DESCRIPTION_MAX = 300
 DESCRIPTION_LINES = 3
+CONTEXT_MAX = 3
+"""Most context hashtags (the game or show, the streamer or creator) shared by all posts."""
+_VAGUE = re.compile(
+    r"\b(one person|two people|a person|someone|the speaker|a heated exchange between)\b",
+    re.IGNORECASE,
+)
+"""Wording that hides who is in the clip (#129): the LLM must name them instead."""
 HASHTAGS = (3, 5)
 """Fewest and most hashtags per clip."""
 CLIP_WORDS = 220
@@ -125,14 +132,50 @@ def _draft(item: dict[str, Any], i: int) -> PostDraft:
             f'entry {i}: "description" has {len(description)} characters; '
             f"the most is {DESCRIPTION_MAX}"
         )
+    for field, text in (("title", title), ("description", description)):
+        if vague := _VAGUE.search(text):
+            raise InvalidPostsError(
+                f'entry {i}: "{field}" says "{vague.group(0)}"; name them instead (the '
+                "streamer, or the characters, e.g. Jason and Lucia), or describe their role"
+            )
     return PostDraft(title=title, description=description, hashtags=_hashtags(item, i))
+
+
+def _context(data: dict[str, Any]) -> list[str]:
+    value = data.get("context_hashtags", [])
+    if not isinstance(value, list) or not all(isinstance(t, str) for t in value):
+        raise InvalidPostsError('"context_hashtags" must be a list of strings')
+    tags: list[str] = []
+    for raw in value:
+        tag = raw.strip().lstrip("#")
+        if not tag or any(c.isspace() or c == "#" for c in tag):
+            raise InvalidPostsError(f'context hashtag "{raw}" must be one word without spaces')
+        if tag.lower() not in (t.lower() for t in tags):
+            tags.append(tag)
+    if len(tags) > CONTEXT_MAX:
+        raise InvalidPostsError(f"give at most {CONTEXT_MAX} context hashtags, not {len(tags)}")
+    return tags
+
+
+def _with_context(draft: PostDraft, context: list[str], clip: int) -> PostDraft:
+    """``draft`` with the context hashtags first. Raises if it leaves one out."""
+    have = {t.lower() for t in draft.hashtags}
+    if missing := [t for t in context if t.lower() not in have]:
+        raise InvalidPostsError(
+            f"clip {clip}: its hashtags must include the context hashtags "
+            f"({', '.join(missing)}), first"
+        )
+    wanted = {t.lower() for t in context}
+    rest = [t for t in draft.hashtags if t.lower() not in wanted]
+    return PostDraft(draft.title, draft.description, [*context, *rest])
 
 
 def parse_posts(raw: str, count: int) -> list[PostDraft]:
     """Parse an LLM answer into one ``PostDraft`` per clip number ``0..count-1``.
 
-    Accepts ``{"posts": [...]}`` or a bare list, optionally in a Markdown code fence.
-    Raises InvalidPostsError with a message meant for the LLM.
+    Accepts ``{"context_hashtags": [...], "posts": [...]}`` (every post must carry the
+    context hashtags; they're put first), or a bare list, optionally in a Markdown code
+    fence. Raises InvalidPostsError with a message meant for the LLM.
     """
     text = raw.strip()
     if fenced := _FENCE.match(text):
@@ -141,7 +184,9 @@ def parse_posts(raw: str, count: int) -> list[PostDraft]:
         data: Any = json.loads(text)
     except json.JSONDecodeError as e:
         raise InvalidPostsError(f"the answer is not valid JSON ({e})") from e
+    context: list[str] = []
     if isinstance(data, dict) and "posts" in data:
+        context = _context(data)
         data = data["posts"]
     if not isinstance(data, list):
         raise InvalidPostsError('expected a JSON object of the form {"posts": [...]}')
@@ -157,7 +202,7 @@ def parse_posts(raw: str, count: int) -> list[PostDraft]:
             raise InvalidPostsError(f"entry {i}: there is no clip {clip}; use 0 to {count - 1}")
         if clip in drafts:
             raise InvalidPostsError(f"clip {clip} has more than one entry")
-        drafts[clip] = _draft(item, i)
+        drafts[clip] = _with_context(_draft(item, i), context, clip)
     if missing := [i for i in range(count) if i not in drafts]:
         raise InvalidPostsError(f"no entry for clip(s) {', '.join(map(str, missing))}")
     return [drafts[i] for i in range(count)]
@@ -183,6 +228,7 @@ class LLMPostWriter:
         self.config = config
         self.system = prompts.SYSTEM_PROMPT.format(
             title_max=TITLE_MAX,
+            context_max=CONTEXT_MAX,
             description_max=DESCRIPTION_MAX,
             hashtags_min=HASHTAGS[0],
             hashtags_max=HASHTAGS[1],
