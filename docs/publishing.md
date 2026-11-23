@@ -32,6 +32,12 @@ YouTube needs a Google Cloud project with an OAuth client for Echo (free, about 
    echo-clips auth youtube --client-secrets ~/Downloads/client_secret_XXXX.json
    ```
 
+**Posting to another channel** (e.g. a separate channel for clips, not your main one):
+create it on YouTube (*Settings → Add or manage your channel(s) → Create a channel*; it
+becomes a Brand Account your Gmail manages), then run `echo-clips auth youtube` again and
+pick that channel in Google's account chooser. The new sign-in replaces the old one. The
+test user stays your Gmail.
+
 The client file and the refresh token live in `~/.config/echo/` (or `$ECHO_CONFIG_DIR`),
 never in the repo or a job. To sign out, delete `~/.config/echo/youtube-token.json` and
 remove Echo under your Google account's *Third-party access*.

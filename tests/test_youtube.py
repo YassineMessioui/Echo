@@ -259,6 +259,7 @@ def test_sign_in_flow_stores_only_the_refresh_token(config_dir: Path):
     path = youtube.sign_in(CLIENT, http=google.client(), open_browser=browser, timeout=10)
     query = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(opened[0]).query))
     assert query["scope"] == youtube.SCOPE and query["access_type"] == "offline"
+    assert query["prompt"] == "select_account consent"  # the channel chooser is always shown
     assert query["code_challenge_method"] == "S256"
     exchange = dict(urllib.parse.parse_qsl(google.requests[0].content.decode()))
     assert exchange["code"] == "c1" and exchange["code_verifier"]

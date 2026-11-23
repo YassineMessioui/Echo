@@ -135,7 +135,9 @@ def auth_url(client: ClientSecrets, redirect_uri: str, state: str, challenge: st
         "response_type": "code",
         "scope": SCOPE,
         "access_type": "offline",  # a refresh token, so later uploads need no browser
-        "prompt": "consent",
+        # Always show the account/channel chooser (a Brand Account channel is picked
+        # there) and the consent screen, so a refresh token is always returned.
+        "prompt": "select_account consent",
         "state": state,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
