@@ -54,8 +54,15 @@ _PROMPT_TOKENS = 700
 _ANSWER_TOKENS_PER_CLIP = 120
 MAX_IMAGES = 5
 """Frames per LLM call (vision APIs cap images per request; 5 is the common floor)."""
-_TOO_LARGE = re.compile(r"\b413\b|too large|tokens per minute|reduce your message", re.IGNORECASE)
-"""An LLM error that means "send less at once", not "this model can't see images"."""
+_TOO_LARGE = re.compile(r"\b413\b|too large", re.IGNORECASE)
+"""An LLM error that means "send less at once" (a request-size cap, not a rate limit)."""
+_REFUSES_IMAGES = re.compile(r"image|vision|multimodal|content.?type", re.IGNORECASE)
+"""...that means "this model can't take images": then frames are turned off..."""
+_TRANSIENT = re.compile(r"\bHTTP 5\d\d\b|timed out|timeout|cancel|interrupt|closed", re.IGNORECASE)
+"""...unless it's an outage, a timeout or Ctrl+C, which are re-raised instead."""
+IMAGE_TOKENS = 600
+"""Rough input tokens per frame, for batching (Gemini counts ~258 for 576x512; Groq's
+qwen more)."""
 _THINKING = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
@@ -260,6 +267,8 @@ class LLMPostWriter:
         self.vision = vision
         """Show the clips' frames to the model; turned off if it refuses images."""
         self.vision_error: str | None = None
+        self.used_frames = False
+        """Whether any text in this run was written with frames (recorded in job.json)."""
         self.system = prompts.SYSTEM_PROMPT.format(
             title_max=TITLE_MAX,
             context_max=CONTEXT_MAX,
@@ -282,12 +291,15 @@ class LLMPostWriter:
             try:
                 return self._write(clips, source, images=True)
             except LLMError as e:
-                if _TOO_LARGE.search(str(e)) and len(clips) > 1:
-                    # A request-size or tokens-per-minute cap (e.g. Groq's free tier):
+                message = str(e)
+                if _TOO_LARGE.search(message) and len(clips) > 1:
+                    # A request-size cap (e.g. Groq's free tier: 7000 tokens per request):
                     # fewer clips per call, still with their frames.
                     half = len(clips) // 2
                     return self.write(clips[:half], source) + self.write(clips[half:], source)
-                self.vision, self.vision_error = False, str(e)
+                if not (_REFUSES_IMAGES.search(message) and not _TRANSIENT.search(message)):
+                    raise  # an outage, a timeout or Ctrl+C: not a reason to stop sending frames
+                self.vision, self.vision_error = False, message
                 log.warning("the model didn't take the clips' frames, writing from text: %s", e)
         return self._write(clips, source, images=False)
 
@@ -312,7 +324,9 @@ class LLMPostWriter:
                 self.system, prompt, json_schema=prompts.POSTS_SCHEMA, images=frames
             )
             try:
-                return parse_posts(raw, len(clips))
+                drafts = parse_posts(raw, len(clips))
+                self.used_frames = self.used_frames or bool(frames)
+                return drafts
             except InvalidPostsError as e:
                 error = e
                 prompt = prompts.RETRY_PROMPT.format(
@@ -336,8 +350,8 @@ def batches(clips: Sequence[ClipText], budget: int) -> list[range]:
     result: list[range] = []
     start, used, images = 0, 0, 0
     for i, clip in enumerate(clips):
-        cost = approx_tokens(_format(i, clip)) + _ANSWER_TOKENS_PER_CLIP
         image = 1 if clip.frame else 0
+        cost = approx_tokens(_format(i, clip)) + _ANSWER_TOKENS_PER_CLIP + image * IMAGE_TOKENS
         if i > start and (used + cost > room or images + image > MAX_IMAGES):
             result.append(range(start, i))
             start, used, images = i, 0, 0
@@ -438,6 +452,7 @@ def update_posts(
     job.write_posts(result)
     if todo:
         meta = job.read_meta()
-        meta.models["posts_prompt"] = writer.prompt_version
+        frames = "+frames" if writer.used_frames else ""
+        meta.models["posts_prompt"] = f"{writer.prompt_version}{frames}"
         job.write_meta(meta)
     return PostsUpdate(posts=result, written=[names[i] for i in todo], dropped=dropped)

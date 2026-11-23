@@ -513,3 +513,47 @@ def test_a_too_large_request_is_split_not_given_up():
     assert len(w.write(framed)) == 3
     assert w.vision is True and w.vision_error is None
     assert [c.images for c in client.calls if c is not None] == [(b"jpeg",)] * 3
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "gemini returned HTTP 503 after 5 retries",
+        "Ollama request timed out after 120s",
+        "request cancelled",
+        "groq returned HTTP 429: rate limit reached for tokens per minute",
+    ],
+)
+def test_outages_are_raised_and_keep_vision_on(error):
+    """Yassine's review on #136: only "this model can't take images" turns frames off; a
+    503, a timeout, Ctrl+C or a rate limit must not, with a wrong note."""
+
+    class Failing(FakeLLMClient):
+        def complete(self, system, prompt, *, json_schema=None, images=()):
+            raise LLMError(error)
+
+    w = LLMPostWriter(Failing([]), LLMConfig())
+    with pytest.raises(LLMError):
+        w.write([ClipText("t", "", "x", frame=b"jpeg")])
+    assert w.vision is True and w.vision_error is None
+
+
+def test_job_json_records_whether_frames_were_used(job_copy: Job, monkeypatch):
+    import echo.publish.text as text_module
+
+    monkeypatch.setattr(text_module, "clip_frame", lambda path, d: b"jpeg")
+    update_posts(job_copy, writer(answer(entry(0), entry(1))), CHUNK)
+    assert job_copy.read_meta().models["posts_prompt"] == f"{prompts.POSTS_PROMPT_VERSION}+frames"
+    w = LLMPostWriter(FakeLLMClient([answer(entry(0), entry(1))]), LLMConfig(), vision=False)
+    update_posts(job_copy, w, CHUNK, regenerate=True)
+    assert job_copy.read_meta().models["posts_prompt"] == prompts.POSTS_PROMPT_VERSION
+
+
+def test_frames_count_toward_the_batch_budget():
+    from echo.publish.text import IMAGE_TOKENS
+
+    plain = [ClipText("t", "", "x")] * 4
+    framed = [ClipText("t", "", "x", frame=b"j")] * 4
+    budget = 700 + 4 * 130 + IMAGE_TOKENS  # 4 plain clips fit; 4 framed ones don't
+    assert len(batches(plain, budget)) == 1
+    assert len(batches(framed, budget)) > 1

@@ -588,14 +588,16 @@ def posts(
     ] = _D.llm.provider,
     llm_model: Annotated[str, typer.Option(help="LLM model name.")] = _D.llm.model,
     frames: Annotated[
-        bool,
+        bool | None,
         typer.Option(
             "--frames/--no-frames",
             help="Show the model a frame of each clip, so the text knows a game's cutscene "
-            "from the streamer (needs a vision model, e.g. groq qwen/qwen3.8-27b or "
-            "gemini; others fall back to text).",
+            "from the streamer. Needs a vision model (e.g. groq qwen/qwen3.8-27b, gemini); "
+            "frames, including a streamer's webcam, are sent to the provider. Default: on "
+            "for hosted providers, off for Ollama.",
+            show_default=False,
         ),
-    ] = True,
+    ] = None,
     regenerate: Annotated[
         bool,
         typer.Option(
@@ -629,7 +631,11 @@ def posts(
     writer: LLMPostWriter | None = None
     try:
         the_job = _open_job(job, config.jobs_dir)
-        writer = LLMPostWriter(make_llm_client(config.llm), config.llm, vision=frames)
+        writer = LLMPostWriter(
+            make_llm_client(config.llm),
+            config.llm,
+            vision=frames if frames is not None else config.llm.provider != "ollama",
+        )
         update = update_posts(the_job, writer, config.chunk, regenerate=regenerate)
     except EchoError as e:
         if verbose:
