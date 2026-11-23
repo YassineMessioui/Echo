@@ -91,9 +91,23 @@ def _main(
     ] = None,
 ) -> None:
     """Turn a long video into short vertical clips."""
+    _tolerant_output()
     # API keys (GROQ_API_KEY, MISTRAL_API_KEY, ...) can live in a git-ignored .env, found
     # from the current directory upwards. Variables already set in the shell win.
     load_dotenv(find_dotenv(usecwd=True), override=False)
+
+
+def _tolerant_output(streams: Sequence[Any] | None = None) -> None:
+    """Never crash on printing: a redirected stdout on Windows is cp1252, which can't
+    encode the LLM's typography (non-breaking hyphens, emoji) or non-Latin titles.
+    Unencodable characters become ``?``."""
+    for stream in streams if streams is not None else (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(errors="replace")
+            except (ValueError, OSError):  # already written to, or not a text stream
+                pass
 
 
 QUIET_ENV = {

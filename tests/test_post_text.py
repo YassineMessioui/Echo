@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
 from pathlib import Path
@@ -286,3 +287,14 @@ def test_cli_reports_errors(jobs: Path, monkeypatch):
     assert result.exit_code == 1 and "no job 'nope'" in result.stderr
     result = runner.invoke(cli.app, ["posts", "ep42", "--jobs-dir", str(jobs)])
     assert result.exit_code == 1 and "error:" in result.stderr
+
+
+def test_output_never_crashes_on_unencodable_text():
+    """A redirected stdout on Windows is cp1252: the LLM's non-breaking hyphens (seen in
+    a real run) must not crash the listing."""
+    buffer = io.BytesIO()
+    stream = io.TextIOWrapper(buffer, encoding="cp1252")
+    cli._tolerant_output([stream])
+    stream.write("re‑positioning \U0001f525")
+    stream.flush()
+    assert buffer.getvalue() == b"re?positioning ?"
