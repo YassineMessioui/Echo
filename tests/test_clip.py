@@ -1,4 +1,6 @@
+import hashlib
 import http.server
+import json
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -725,3 +727,37 @@ def test_up_to_date_clips_count_as_done(job_copy):
     assert len(clipper.cut) == 1
     assert [f for f, _ in reports] == sorted(f for f, _ in reports)
     assert reports[-1] == (1.0, f"clip {n}/{n}")
+
+
+# --- reframe setting (#16) ------------------------------------------------------------
+
+
+def _sha(data: object) -> str:
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def test_reframe_centre_keeps_old_fingerprints(job_copy):
+    """Clips cut before ``ClipConfig.reframe`` existed are not re-cut after upgrading:
+    the default leaves both fingerprints exactly as they were."""
+    job = _job_with_video(job_copy)
+    config = PipelineConfig()
+    ClipStage(clipper=RecordingClipper()).run(job, config)
+    before = config.clip.model_dump(mode="json")
+    del before["reframe"]
+    manifest = json.loads((job.clips_dir / MANIFEST).read_text())
+    assert {e["config"] for e in manifest.values()} == {_sha(before)}
+    caption = config.caption.model_dump(mode="json")
+    assert ClipStage().settings(config) == _sha(
+        {"clip": before, "caption": caption, "speakers": False}
+    )
+
+
+@pytest.mark.parametrize("reframe", ["face", "speaker"])
+def test_changing_reframe_recuts(job_copy, reframe):
+    job = _job_with_video(job_copy)
+    ClipStage(clipper=RecordingClipper()).run(job, PipelineConfig())
+    config = PipelineConfig(clip=ClipConfig(reframe=reframe))
+    assert ClipStage().settings(config) != ClipStage().settings(PipelineConfig())
+    clipper = RecordingClipper()
+    ClipStage(clipper=clipper).run(job, config)
+    assert len(clipper.cut) == len(job.read_clips())
