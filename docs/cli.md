@@ -36,6 +36,8 @@ resumes that job instead of downloading it again. YouTube needs a JavaScript run
 | `--aspect [9:16\|source]` | `9:16` | `ClipConfig.aspect` |
 | `--crop-x FLOAT` | `0.5` | `ClipConfig.crop_x` (0 = left, 1 = right) |
 | `--reframe [centre\|face\|speaker]` | `centre` | `ClipConfig.reframe`: `face` puts the 9:16 window on the faces of each shot (camera cuts are detected; `--crop-x` where there's no face). Adds ~3–4 s per clip; the face model (230 KB, MIT) downloads once to `~/.cache/echo/models`. `speaker` frames like `face` until #109 |
+| `--webcam / --no-webcam` | on | `ClipConfig.webcam`: on streams, keep the streamer's webcam overlay in a corner of the 9:16 clip (#126). It's found automatically: a small face that stays put while the gameplay around it moves, searched in all clips at once so every clip gets the same box. Clips without one are unchanged. Adds ~4 s per clip (a few single-frame seeks) |
+| `--webcam-corner [top-left\|top-right\|bottom-left\|bottom-right]` | `top-left` | `ClipConfig.webcam_corner`: the top corners stay clear of the captions |
 | `--background [blur\|black]` | `blur` | `ClipConfig.background` |
 | `--captions / --no-captions` | on | `CaptionConfig.enabled` (burned-in, word-highlighted) |
 | `--speakers / --no-speakers` | off | `DiarizeConfig.enabled`: detect who speaks when (`speakers.json`); captions get a colour per speaker. Adds ~5 min of CPU per hour of audio; the models (~46 MB) download once to `~/.cache/echo/models` (`ECHO_MODELS_DIR`) |
