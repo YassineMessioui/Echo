@@ -45,6 +45,7 @@ from echo.job import Job, _atomic_write
 from echo.models import ClipSpec, Speakers, StageName
 from echo.reframe import crop_window, frame_geometry, video_filter_for
 from echo.reframe import video_filter as reframe_filter
+from echo.webcam import ExcludingDetector, detect_webcam, overlay_filter
 
 log = logging.getLogger(__name__)
 
@@ -174,15 +175,18 @@ def cut_clips(
             "can't be burned in. Install an ffmpeg build with libass, or turn captions off "
             "(--no-captions, or caption.enabled = false)."
         )
-    # Face framing (#16) replaces the fixed crop_x, on sources the 9:16 filter crops.
-    face = video_filter is None and config.aspect != "source" and config.reframe != "centre"
+    # Face framing (#16) replaces the fixed crop_x, on sources the 9:16 filter crops; a
+    # streamer's webcam overlay (#126) is kept in a corner of them.
+    framed = video_filter is None and config.aspect != "source"
+    face = framed and config.reframe != "centre"
+    webcam = framed and config.webcam == "auto"
     if video_filter is None and clips:
         if isinstance(video, RemoteVideo):
             video_filter = reframe_filter(video.width, video.height, config)
         else:
             video_filter = video_filter_for(video, config)
     geometry, window = None, None
-    if face and clips:
+    if (face or webcam) and clips:
         if isinstance(video, RemoteVideo):
             geometry = (video.width, video.height, 1.0)
         else:
@@ -191,17 +195,28 @@ def cut_clips(
     for clip, out in zip(clips, outputs, strict=True):
         clip_filter = video_filter
         if window is not None and geometry is not None:
-            started = time.monotonic()
-            x = frame_crop(
-                video_input_args(video, clip.start),
-                clip.duration,
-                *window,
-                config.crop_x,
-                detector or default_detector(),
-            )
-            log.info("face framing took %.1f s: crop x = %s", time.monotonic() - started, x)
             width, height, sar = geometry
-            clip_filter = reframe_filter(width, height, config, sar=sar, crop_x_expr=x)
+            found = detector or default_detector()
+            box = None
+            if webcam:
+                started = time.monotonic()
+                box = detect_webcam(
+                    video_input_args(video, clip.start), clip.duration, *window[:2], found
+                )
+                log.info("webcam search took %.1f s", time.monotonic() - started)
+            if face:
+                started = time.monotonic()
+                x = frame_crop(
+                    video_input_args(video, clip.start),
+                    clip.duration,
+                    *window,
+                    config.crop_x,
+                    found if box is None else ExcludingDetector(found, box),
+                )
+                log.info("face framing took %.1f s: crop x = %s", time.monotonic() - started, x)
+                clip_filter = reframe_filter(width, height, config, sar=sar, crop_x_expr=x)
+            if box is not None and clip_filter is not None:
+                clip_filter = overlay_filter(clip_filter, box, width, height, config)
         _cut_one(video, clip, out, config, chain_filters(clip_filter, extra_filter))
 
 

@@ -397,7 +397,9 @@ def test_extra_filter_is_chained_after_reframing(monkeypatch, tmp_path):
     monkeypatch.setattr(clip_module, "ffmpeg", lambda args: seen.append(args))
     monkeypatch.setattr(clip_module.os, "replace", lambda a, b: None)
     clip = ClipSpec.between("t", 0, 20)
-    cut_clips(video, [clip], [tmp_path / "o.mp4"], ClipConfig(), extra_filter="eq=gamma=1.1")
+    cut_clips(
+        video, [clip], [tmp_path / "o.mp4"], ClipConfig(webcam="off"), extra_filter="eq=gamma=1.1"
+    )
     args = seen[0]
     assert args[args.index("-vf") + 1] == "crop=1:1,scale=1080:1920,eq=gamma=1.1"
 
