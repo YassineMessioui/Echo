@@ -25,3 +25,8 @@ jobs/
 .DS_Store
 .idea/
 .vscode/
+
+# Publishing credentials (#103): Google OAuth client files and sign-in tokens.
+client_secret*.json
+youtube-client.json
+youtube-token.json
