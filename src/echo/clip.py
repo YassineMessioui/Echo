@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,12 +37,16 @@ from echo.captions import CaptionStyle, build_ass, chain_filters, subtitles_filt
 from echo.config import ClipConfig, PipelineConfig
 from echo.download import video_source
 from echo.errors import ArtifactError, ExternalToolError, InvalidInputError
+from echo.faces import FaceDetector, default_detector
 from echo.ffmpeg import ffmpeg, has_filter, http_options
+from echo.framing import frame_crop
 from echo.interfaces import Clipper, RemoteVideo
 from echo.job import Job, _atomic_write
-from echo.models import ClipSpec, StageName
+from echo.models import ClipSpec, Speakers, StageName
+from echo.reframe import crop_window, frame_geometry, video_filter_for
 from echo.reframe import video_filter as reframe_filter
-from echo.reframe import video_filter_for
+
+log = logging.getLogger(__name__)
 
 REMOTE_REQUEST_SIZE = 2**20
 """Bytes per HTTP request when reading a ``RemoteVideo``."""
@@ -62,6 +68,20 @@ def _remote_input_options() -> list[str]:
     return [arg for k, v in _REMOTE_OPTIONS.items() if k in supported for arg in (f"-{k}", v)]
 
 
+def video_input_args(video: Path | RemoteVideo, start: float) -> list[str]:
+    """ffmpeg arguments that open ``video`` as input 0, seeked exactly to ``start``."""
+    seek = ["-accurate_seek", "-ss", f"{start:.3f}"]
+    if not isinstance(video, RemoteVideo):
+        return [*seek, "-i", str(video)]
+    # -headers puts them in ffmpeg's argv (visible in the process list). That's fine:
+    # echo.download never resolves a stream whose headers carry credentials
+    # (CREDENTIAL_HEADER), and echo.ffmpeg.run never logs argv (errors show stderr).
+    args = []
+    if video.headers:
+        args += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in video.headers.items())]
+    return [*args, *_remote_input_options(), *seek, "-i", video.url]
+
+
 def build_ffmpeg_args(
     video: Path | RemoteVideo,
     clip: ClipSpec,
@@ -79,20 +99,11 @@ def build_ffmpeg_args(
     clip's bytes are fetched, and the audio comes from the local file. Both inputs are
     seeked to the same start, so they stay in sync.
     """
-    start = f"{clip.start:.3f}"
+    args = video_input_args(video, clip.start)
     if isinstance(video, RemoteVideo):
-        # -headers puts them in ffmpeg's argv (visible in the process list). That's fine:
-        # echo.download never resolves a stream whose headers carry credentials
-        # (CREDENTIAL_HEADER), and echo.ffmpeg.run never logs argv (errors show stderr).
-        args = []
-        if video.headers:
-            args += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in video.headers.items())]
-        args += _remote_input_options()
-        args += ["-accurate_seek", "-ss", start, "-i", video.url]
-        args += ["-accurate_seek", "-ss", start, "-i", str(video.audio)]
+        args += ["-accurate_seek", "-ss", f"{clip.start:.3f}", "-i", str(video.audio)]
         audio_map = "1:a:0"
     else:
-        args = ["-accurate_seek", "-ss", start, "-i", str(video)]
         audio_map = "0:a:0?"
     args += ["-t", f"{clip.duration:.3f}", "-map", "0:v:0", "-map", audio_map]
     if video_filter is not None:
@@ -132,12 +143,19 @@ def cut_clips(
     *,
     video_filter: str | None = None,
     extra_filter: str | None = None,
+    speakers: Speakers | None = None,
+    detector: FaceDetector | None = None,
 ) -> None:
     """Implements ``echo.interfaces.Clipper``.
 
     The frame is shaped by ``config.aspect`` (see ``echo.reframe``); pass
     ``video_filter`` to use a different ``-vf`` filter instead. ``extra_filter`` (e.g.
     burned-in captions) is chained after it, in the same encode.
+
+    With ``config.reframe`` ``"face"`` (or ``"speaker"``, which frames like ``"face"``
+    until #109), each clip is sampled first and the window follows the faces shot by
+    shot (``echo.framing``), using ``detector`` (YuNet by default). ``speakers`` is for
+    ``"speaker"`` (#109).
 
     Raises ValueError if ``clips`` and ``outputs`` differ in length, InvalidInputError if
     ``video`` is missing or has no video stream and ExternalToolError if ffmpeg fails.
@@ -156,14 +174,35 @@ def cut_clips(
             "can't be burned in. Install an ffmpeg build with libass, or turn captions off "
             "(--no-captions, or caption.enabled = false)."
         )
+    # Face framing (#16) replaces the fixed crop_x, on sources the 9:16 filter crops.
+    face = video_filter is None and config.aspect != "source" and config.reframe != "centre"
     if video_filter is None and clips:
         if isinstance(video, RemoteVideo):
             video_filter = reframe_filter(video.width, video.height, config)
         else:
             video_filter = video_filter_for(video, config)
-    video_filter = chain_filters(video_filter, extra_filter)
+    geometry, window = None, None
+    if face and clips:
+        if isinstance(video, RemoteVideo):
+            geometry = (video.width, video.height, 1.0)
+        else:
+            geometry = frame_geometry(video)
+        window = crop_window(geometry[0], geometry[1], sar=geometry[2])
     for clip, out in zip(clips, outputs, strict=True):
-        _cut_one(video, clip, out, config, video_filter)
+        clip_filter = video_filter
+        if window is not None and geometry is not None:
+            started = time.monotonic()
+            x = frame_crop(
+                video_input_args(video, clip.start),
+                clip.duration,
+                *window,
+                config.crop_x,
+                detector or default_detector(),
+            )
+            log.info("face framing took %.1f s: crop x = %s", time.monotonic() - started, x)
+            width, height, sar = geometry
+            clip_filter = reframe_filter(width, height, config, sar=sar, crop_x_expr=x)
+        _cut_one(video, clip, out, config, chain_filters(clip_filter, extra_filter))
 
 
 _: Clipper = cut_clips
@@ -182,8 +221,17 @@ def _clip_hash(clip: ClipSpec) -> str:
     return _hash(clip.model_dump(mode="json"))
 
 
+def _config_data(config: ClipConfig) -> dict[str, object]:
+    """``config`` as fingerprinted. Settings added later are left out while they have the
+    value that reproduces the earlier output, so upgrading Echo doesn't re-cut old jobs."""
+    data = config.model_dump(mode="json")
+    if data.get("reframe") == "centre":
+        del data["reframe"]  # #16: "centre" is what every clip cut before it used
+    return data
+
+
 def _entry(clip: ClipSpec, config: ClipConfig, captions: str | None) -> dict[str, str]:
-    entry = {"clip": _clip_hash(clip), "config": _hash(config.model_dump(mode="json"))}
+    entry = {"clip": _clip_hash(clip), "config": _hash(_config_data(config))}
     if captions is not None:
         # The caption track's content: re-transcribing or restyling re-cuts the clip.
         entry["captions"] = _hash(captions)
@@ -226,7 +274,7 @@ class ClipStage:
         """Fingerprint of everything besides the clip boundaries that changes the clips."""
         return _hash(
             {
-                "clip": config.clip.model_dump(mode="json"),
+                "clip": _config_data(config.clip),
                 "caption": config.caption.model_dump(mode="json"),
                 "speakers": config.diarize.enabled,
             }

@@ -171,6 +171,7 @@ def test_options_map_to_config_fields(fake, video, jobs_dir):
         "--aspect", "source",
         "--crop-x", "0.25",
         "--background", "black",
+        "--reframe", "face",
     )  # fmt: skip
     assert result.exit_code == 0, result.output
     c = fake.config
@@ -181,6 +182,7 @@ def test_options_map_to_config_fields(fake, video, jobs_dir):
     assert (c.refine.min_duration, c.refine.max_duration) == (20.0, 45.0)
     assert c.refine.max_clips == 3
     assert (c.clip.aspect, c.clip.crop_x, c.clip.background) == ("source", 0.25, "black")
+    assert c.clip.reframe == "face"
     # untouched fields keep their defaults
     defaults = PipelineConfig()
     assert c.llm.host == defaults.llm.host
