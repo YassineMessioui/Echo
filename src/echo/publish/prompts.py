@@ -29,10 +29,13 @@ and without spaces (e.g. "sleep", "productivitytips").
 
 Rules:
 - Write in the language the clip is spoken in.
-- The source video (its title and channel), when given, tells you what the clips are \
-from, e.g. the game, show or creator. Use it in titles and hashtags (e.g. the game's \
-name), but describe only what the clip itself shows.
-- Base everything on the clip's own words. Never invent facts, names or numbers.
+- When a source video is given, the clips come from it: a game stream, a show, a \
+podcast. Viewers search for that, so when the source names a game, show or creator, \
+the hashtags must include it (e.g. "gta6", "ishowspeed"), and the title should mention \
+it where it fits (e.g. "IShowSpeed gets grilled in GTA 6"). Dialogue in a game is \
+the game's characters talking, not real life.
+- Base everything else on the clip's own words. Never invent facts, names or numbers \
+beyond the clip and its source.
 - Answer with JSON only, in the form {{"posts": [{{"clip": <number>, "title": ..., \
 "description": ..., "hashtags": [...]}}, ...]}}, with one entry for every clip."""
 
