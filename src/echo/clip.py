@@ -38,7 +38,7 @@ from echo.errors import ArtifactError, ExternalToolError, InvalidInputError
 from echo.ffmpeg import ffmpeg, has_filter, http_options
 from echo.interfaces import Clipper, RemoteVideo
 from echo.job import Job, _atomic_write
-from echo.models import ClipSpec, StageName
+from echo.models import ClipSpec, Speakers, StageName
 from echo.reframe import video_filter as reframe_filter
 from echo.reframe import video_filter_for
 
@@ -132,12 +132,15 @@ def cut_clips(
     *,
     video_filter: str | None = None,
     extra_filter: str | None = None,
+    speakers: Speakers | None = None,
 ) -> None:
     """Implements ``echo.interfaces.Clipper``.
 
     The frame is shaped by ``config.aspect`` (see ``echo.reframe``); pass
     ``video_filter`` to use a different ``-vf`` filter instead. ``extra_filter`` (e.g.
-    burned-in captions) is chained after it, in the same encode.
+    burned-in captions) is chained after it, in the same encode. ``speakers`` is for
+    ``config.reframe == "speaker"`` (#16). Until #16 lands, every ``reframe`` mode frames
+    like ``"centre"``.
 
     Raises ValueError if ``clips`` and ``outputs`` differ in length, InvalidInputError if
     ``video`` is missing or has no video stream and ExternalToolError if ffmpeg fails.
@@ -182,8 +185,17 @@ def _clip_hash(clip: ClipSpec) -> str:
     return _hash(clip.model_dump(mode="json"))
 
 
+def _config_data(config: ClipConfig) -> dict[str, object]:
+    """``config`` as fingerprinted. Settings added later are left out while they have the
+    value that reproduces the earlier output, so upgrading Echo doesn't re-cut old jobs."""
+    data = config.model_dump(mode="json")
+    if data.get("reframe") == "centre":
+        del data["reframe"]  # #16: "centre" is what every clip cut before it used
+    return data
+
+
 def _entry(clip: ClipSpec, config: ClipConfig, captions: str | None) -> dict[str, str]:
-    entry = {"clip": _clip_hash(clip), "config": _hash(config.model_dump(mode="json"))}
+    entry = {"clip": _clip_hash(clip), "config": _hash(_config_data(config))}
     if captions is not None:
         # The caption track's content: re-transcribing or restyling re-cuts the clip.
         entry["captions"] = _hash(captions)
@@ -226,7 +238,7 @@ class ClipStage:
         """Fingerprint of everything besides the clip boundaries that changes the clips."""
         return _hash(
             {
-                "clip": config.clip.model_dump(mode="json"),
+                "clip": _config_data(config.clip),
                 "caption": config.caption.model_dump(mode="json"),
                 "speakers": config.diarize.enabled,
             }
