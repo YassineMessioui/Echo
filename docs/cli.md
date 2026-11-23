@@ -22,7 +22,7 @@ resumes that job instead of downloading it again. YouTube needs a JavaScript run
 | `--job-id TEXT` | random 12-char hex | `Job.create(..., job_id=)`; reusing an id resumes that job |
 | `--jobs-dir PATH` | `jobs` | `PipelineConfig.jobs_dir` |
 | `--force` | off | `run_pipeline(force=True)`: re-run every stage |
-| `--from-stage [ingest\|transcribe\|llm\|refine\|clip]` | none | `run_pipeline(from_stage=)`: re-run that stage and every later one |
+| `--from-stage [ingest\|transcribe\|diarize\|llm\|score\|refine\|clip]` | none | `run_pipeline(from_stage=)`: re-run that stage and every later one |
 | `--range START:END` | whole video | `IngestConfig.start` / `end`: only process that part (see [Focus range](#focus-range)) |
 | `--whisper-model TEXT` | `small` | `TranscribeConfig.model_size` |
 | `--language TEXT` | auto-detect | `TranscribeConfig.language` |
@@ -31,7 +31,8 @@ resumes that job instead of downloading it again. YouTube needs a JavaScript run
 | `--llm-concurrency INT` | 4 hosted, 1 Ollama | `LLMConfig.max_concurrency` (1–16): transcript windows sent to the LLM at once; use 1 if a free tier keeps rate-limiting you |
 | `--min-duration FLOAT` | `15` | `RefineConfig.min_duration` (seconds) |
 | `--max-duration FLOAT` | `60` | `RefineConfig.max_duration` (seconds; 60 is the platform cap) |
-| `--max-clips INT` | all | `RefineConfig.max_clips`: keep the N clips closest to ~37 s, in time order. Changing it on an existing job needs `--from-stage refine` |
+| `--max-clips INT` | all | `RefineConfig.max_clips`: keep the N best-scored clips (ties: closest to ~37 s), in time order; with `--no-score`, the N closest to ~37 s. Changing it on an existing job re-runs refine and clip |
+| `--score / --no-score` | on | `ScoreConfig.enabled`: one extra LLM call rates every clip 0–10 for hook, payoff, standalone clarity and energy (`scores.json`, #21), so `--max-clips` keeps the best and the output lists clips best first |
 | `--aspect [9:16\|source]` | `9:16` | `ClipConfig.aspect` |
 | `--crop-x FLOAT` | `0.5` | `ClipConfig.crop_x` (0 = left, 1 = right) |
 | `--background [blur\|black]` | `blur` | `ClipConfig.background` |
@@ -64,19 +65,30 @@ percent that ends up empty or inverted) fails the ingest stage with code 1.
 One line per stage while it runs, e.g.
 
 ```
-[1/5] ingest      done      2.1s
-[2/5] transcribe  skipped
+[1/6] ingest      done      2.1s
+[2/6] transcribe  skipped
 ...
 ```
 
 While a long stage runs (transcribe, llm, clip), a terminal shows one line redrawn in
 place with its percentage, detail and elapsed time, e.g.
-`[2/5] transcribe   42%  12:30 / 58:10  31.0s`, replaced by the stage's final line. When
+`[2/6] transcribe   42%  12:30 / 58:10  31.0s`, replaced by the stage's final line. When
 the output isn't a terminal (piped, redirected), the same line is printed plainly each
 time the stage passes another 10%, with no control characters. `--verbose` also uses the
 plain lines, since its log lines would break a line redrawn in place.
 
-At the end it prints the job directory and the path of every clip. On failure it prints the stage and
+At the end it prints the job directory and the path of every clip; with scores, best
+first, each with its score and the LLM's reason:
+
+```
+clips (5, best first):
+   9.0  jobs/goggins/clips/04-finding-true-potential-through-hard-work.mp4
+        Incredible hook about being 297 pounds and terrified of wasting potential.
+   8.4  jobs/goggins/clips/01-controlling-your-brain-in-hard-times.mp4
+        ...
+```
+
+On failure it prints the stage and
 error message (no traceback unless `--verbose`).
 
 ## `echo-clips posts JOB` (#101)
@@ -122,5 +134,6 @@ echo-clips run episode.mp4 --job-id ep42 --from-stage refine --max-duration 45
 echo-clips run episode.mp4 --llm-provider groq --llm-model openai/gpt-oss-120b
 echo-clips run episode.mp4 --aspect source
 echo-clips run episode.mp4 --range 15%:85%
+echo-clips run episode.mp4 --llm-provider gemini --max-clips 5   # the 5 best
 echo-clips posts ep42 --llm-provider groq   # text for each clip, nothing is posted
 ```

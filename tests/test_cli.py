@@ -287,6 +287,56 @@ def test_lists_job_dir_and_clip_paths(fake, video, jobs_dir):
     assert str(job.clip_video_path(2, "Sleep and productivity")) in result.stdout
 
 
+def _with_golden_scores(fake: FakePipeline) -> None:
+    """The fake run also writes the golden topics.json and scores.json (#21)."""
+    run_pipeline = fake.run_pipeline
+
+    def run_and_score(job, *args, **kwargs):
+        meta = run_pipeline(job, *args, **kwargs)
+        for name in ("topics.json", "scores.json"):
+            shutil.copy(GOLDEN_CLIPS.with_name(name), job.root / name)
+        return meta
+
+    fake.run_pipeline = run_and_score  # the test patches cli.run_pipeline with it
+
+
+def test_lists_clips_best_first_with_scores(fake, video, jobs_dir, monkeypatch):
+    fake.write_clips = True
+    _with_golden_scores(fake)
+    monkeypatch.setattr(cli, "run_pipeline", fake.run_pipeline)
+    result = run(video, jobs_dir, "--job-id", "ep42")
+    assert result.exit_code == 0, result.output
+    job = Job(jobs_dir / "ep42")
+    lines = result.stdout.splitlines()
+    start = lines.index("clips (2, best first):")
+    sleep, solar = (
+        job.clip_video_path(2, "Sleep and productivity"),
+        job.clip_video_path(1, "Solar power is now the cheapest electricity"),
+    )
+    assert lines[start + 1 : start + 5] == [
+        f"   7.6  {sleep}",
+        "        Opens on a relatable claim and lands a concrete takeaway.",
+        f"   6.2  {solar}",
+        "        Clear, surprising fact, but a flat delivery.",
+    ]
+
+
+def test_no_score_lists_clips_in_time_order(fake, video, jobs_dir, monkeypatch):
+    fake.write_clips = True
+    _with_golden_scores(fake)
+    monkeypatch.setattr(cli, "run_pipeline", fake.run_pipeline)
+    result = run(video, jobs_dir, "--job-id", "ep42", "--no-score")
+    assert result.exit_code == 0, result.output
+    assert fake.config.score.enabled is False
+    assert "clips (2):" in result.stdout and "best first" not in result.stdout
+
+
+def test_score_is_on_by_default(fake, video, jobs_dir):
+    assert run(video, jobs_dir).exit_code == 0
+    assert fake.config.score.enabled is True
+    assert fake.stages_config.score.enabled is True
+
+
 def test_no_clips_json(fake, video, jobs_dir):
     result = run(video, jobs_dir)
     assert result.exit_code == 0, result.output
