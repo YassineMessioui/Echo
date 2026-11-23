@@ -315,7 +315,7 @@ def test_the_prompt_names_the_source_video(job_copy: Job):
     w = writer(answer(entry(0), entry(1)))
     update_posts(job_copy, w, CHUNK)
     assert 'Source video: "PLAYING GTA 6 EARLY ACCESS" by IShowSpeed' in w.client.calls[0].prompt
-    assert "the hashtags must include it" in w.client.calls[0].system
+    assert "context_hashtags" in w.client.calls[0].system
 
 
 def test_a_local_job_names_its_file(job_copy: Job):
@@ -332,3 +332,76 @@ def test_no_source_no_intro():
     w = writer(answer(entry(0)))
     w.write([ClipText("t", "", "x")])
     assert w.client.calls[0].prompt.startswith("Clips 0 to 0:")
+
+
+# --- context hashtags and names (#129) ------------------------------------------------------
+
+
+def test_context_hashtags_go_first_in_every_post():
+    raw = json.dumps(
+        {
+            "context_hashtags": ["#GTA6", "ishowspeed"],
+            "posts": [
+                entry(0, hashtags=["lucia", "gta6", "IShowSpeed"]),
+                entry(1, hashtags=["ishowspeed", "jason", "gta6", "vicecity"]),
+            ],
+        }
+    )
+    first, second = parse_posts(raw, 2)
+    assert first.hashtags == ["GTA6", "ishowspeed", "lucia"]
+    assert second.hashtags == ["GTA6", "ishowspeed", "jason", "vicecity"]
+
+
+def test_a_post_without_the_context_hashtags_is_sent_back():
+    raw = json.dumps(
+        {
+            "context_hashtags": ["gta6", "ishowspeed"],
+            "posts": [entry(0, hashtags=["gta6", "a", "b"])],
+        }
+    )
+    with pytest.raises(InvalidPostsError, match=r"clip 0: .*context hashtags \(ishowspeed\)"):
+        parse_posts(raw, 1)
+
+
+@pytest.mark.parametrize(
+    ("context", "message"),
+    [(["a", "b", "c", "d"], "at most 3"), (["two words"], "without spaces"), ("gta6", "list")],
+)
+def test_invalid_context_hashtags(context, message):
+    raw = json.dumps({"context_hashtags": context, "posts": [entry(0)]})
+    with pytest.raises(InvalidPostsError, match=message):
+        parse_posts(raw, 1)
+
+
+def test_no_context_is_fine():
+    raw = json.dumps({"context_hashtags": [], "posts": [entry(0)]})
+    assert parse_posts(raw, 1)[0].hashtags == ["one", "two", "three"]
+
+
+@pytest.mark.parametrize(
+    ("field", "text"),
+    [
+        ("title", "One person gets grilled"),
+        ("description", "A heated exchange between two friends."),
+        ("description", "Someone searches for a car."),
+        ("title", "What the speaker thinks"),
+    ],
+)
+def test_vague_people_are_sent_back(field, text):
+    with pytest.raises(InvalidPostsError, match="name them instead"):
+        parse_posts(answer(entry(0, **{field: text})), 1)
+
+
+def test_named_people_pass():
+    item = entry(0, title="IShowSpeed reacts to Lucia confronting Jason in GTA 6")
+    assert parse_posts(answer(item), 1)[0].title.startswith("IShowSpeed reacts")
+
+
+def test_retry_mentions_the_missing_context():
+    bad = json.dumps({"context_hashtags": ["gta6"], "posts": [entry(0)]})
+    good = json.dumps(
+        {"context_hashtags": ["gta6"], "posts": [entry(0, hashtags=["gta6", "a", "b"])]}
+    )
+    w = writer(bad, good)
+    assert w.write([ClipText("t", "", "x")])[0].hashtags == ["gta6", "a", "b"]
+    assert "context hashtags (gta6)" in w.client.calls[1].prompt
