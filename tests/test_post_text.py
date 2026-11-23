@@ -315,7 +315,7 @@ def test_the_prompt_names_the_source_video(job_copy: Job):
     w = writer(answer(entry(0), entry(1)))
     update_posts(job_copy, w, CHUNK)
     assert 'Source video: "PLAYING GTA 6 EARLY ACCESS" by IShowSpeed' in w.client.calls[0].prompt
-    assert "the game, show or creator" in w.client.calls[0].system
+    assert "the hashtags must include it" in w.client.calls[0].system
 
 
 def test_a_local_job_names_its_file(job_copy: Job):
