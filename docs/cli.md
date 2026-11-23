@@ -104,6 +104,31 @@ posts: jobs/ep42/clips/publish.json
         #sleep #productivity #focus #health #wellbeing
 ```
 
+## `echo-clips review JOB` (#102)
+
+Lists the clips of a job with their post text (from `echo-clips posts`), duration and path, and records a human's decision. **Only approved clips are ever published**, and a clip can only be approved while its video exists. Without options it just lists. Clips are numbered as listed (1, 2, ...).
+
+| Option | Meaning |
+|---|---|
+| `--approve 1,3-5` | approve these clips |
+| `--reject 2` | reject these clips |
+| `--reset 4` | put these clips back to pending |
+| `--clip N --title T --description D --hashtags a,b` | edit clip N's text (`\n` in D for a new line; hashtags without `#`) |
+| `-i`, `--interactive` | go through the pending clips one by one: approve, reject, edit, skip or quit. Each decision is saved at once |
+
+A bad request (unknown clip, two decisions for one clip, a title over 100 characters) exits with 1 and changes nothing.
+
+```
+  1 [approved] 01-how-caffeine-keeps-you-awake.mp4  33.9s
+      How caffeine blocks sleep signals
+      Caffeine blocks adenosine, the molecule that makes you sleepy.
+      #caffeine #sleep #biology #coffee
+      jobs/podcast/clips/01-how-caffeine-keeps-you-awake.mp4
+  2 [pending] 02-why-moving-bikes-stay-upright.mp4  37.5s
+      ...
+2 approved, 1 pending, 0 rejected
+```
+
 ## Exit codes
 
 | Code | Meaning |
@@ -123,4 +148,5 @@ echo-clips run episode.mp4 --llm-provider groq --llm-model openai/gpt-oss-120b
 echo-clips run episode.mp4 --aspect source
 echo-clips run episode.mp4 --range 15%:85%
 echo-clips posts ep42 --llm-provider groq   # text for each clip, nothing is posted
+echo-clips review ep42 -i                   # approve, reject or edit each clip
 ```
