@@ -14,13 +14,15 @@ from __future__ import annotations
 import json
 import logging
 import re
+import tempfile
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from echo.config import ChunkConfig, LLMConfig
-from echo.errors import ArtifactError, TopicExtractionError
+from echo.errors import ArtifactError, EchoError, LLMError, TopicExtractionError
+from echo.ffmpeg import ffmpeg
 from echo.interfaces import LLMClient
 from echo.job import Job
 from echo.llm.chunking import approx_tokens, resolve_max_tokens
@@ -50,6 +52,18 @@ _FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 _PROMPT_TOKENS = 700
 """Budget kept for the system prompt."""
 _ANSWER_TOKENS_PER_CLIP = 120
+MAX_IMAGES = 5
+"""Frames per LLM call (vision APIs cap images per request; 5 is the common floor)."""
+_TOO_LARGE = re.compile(r"\b413\b|too large", re.IGNORECASE)
+"""An LLM error that means "send less at once" (a request-size cap, not a rate limit)."""
+_REFUSES_IMAGES = re.compile(r"image|vision|multimodal|content.?type", re.IGNORECASE)
+"""...that means "this model can't take images": then frames are turned off..."""
+_TRANSIENT = re.compile(r"\bHTTP 5\d\d\b|timed out|timeout|cancel|interrupt|closed", re.IGNORECASE)
+"""...unless it's an outage, a timeout or Ctrl+C, which are re-raised instead."""
+IMAGE_TOKENS = 600
+"""Rough input tokens per frame, for batching (Gemini counts ~258 for 576x512; Groq's
+qwen more)."""
+_THINKING = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -59,6 +73,29 @@ class ClipText:
     topic_title: str
     summary: str
     said: str
+    frame: bytes | None = None
+    """A JPEG of the clip as viewers see it: two moments side by side (``clip_frame``)."""
+
+
+def clip_frame(video: Path, duration: float) -> bytes | None:
+    """A JPEG of two moments of the finished clip (35 % and 70 % in) side by side, each
+    288 wide: what's on screen (a cutscene, gameplay, the streamer's webcam), for vision
+    models (#129). None if the clip can't be read."""
+    if not video.is_file() or duration <= 0:
+        return None
+    with tempfile.TemporaryDirectory(prefix="echo-frame-") as tmp:
+        out = Path(tmp) / "frame.jpg"
+        try:
+            ffmpeg(
+                ["-ss", f"{duration * 0.35:.2f}", "-i", str(video),
+                 "-ss", f"{duration * 0.7:.2f}", "-i", str(video),
+                 "-filter_complex", "[0:v]scale=288:-2[a];[1:v]scale=288:-2[b];[a][b]hstack",
+                 "-frames:v", "1", "-q:v", "5", str(out)]
+            )  # fmt: skip
+        except EchoError as e:
+            log.warning("no frame for %s: %s", video.name, e)
+            return None
+        return out.read_bytes() if out.is_file() else None
 
 
 @dataclass(frozen=True)
@@ -177,7 +214,7 @@ def parse_posts(raw: str, count: int) -> list[PostDraft]:
     context hashtags; they're put first), or a bare list, optionally in a Markdown code
     fence. Raises InvalidPostsError with a message meant for the LLM.
     """
-    text = raw.strip()
+    text = _THINKING.sub("", raw).strip()  # reasoning models may think out loud first
     if fenced := _FENCE.match(text):
         text = fenced.group(1)
     try:
@@ -208,9 +245,10 @@ def parse_posts(raw: str, count: int) -> list[PostDraft]:
     return [drafts[i] for i in range(count)]
 
 
-def _format(i: int, clip: ClipText) -> str:
+def _format(i: int, clip: ClipText, image: int | None = None) -> str:
     topic = f"{clip.topic_title}. {clip.summary}".strip()
-    return f"[{i}] Topic: {topic}\nSaid: {clip.said}"
+    seen = f"\nOn screen: image {image}" if image is not None else ""
+    return f"[{i}] Topic: {topic}{seen}\nSaid: {clip.said}"
 
 
 class LLMPostWriter:
@@ -223,9 +261,14 @@ class LLMPostWriter:
 
     prompt_version = prompts.POSTS_PROMPT_VERSION
 
-    def __init__(self, client: LLMClient, config: LLMConfig) -> None:
+    def __init__(self, client: LLMClient, config: LLMConfig, *, vision: bool = True) -> None:
         self.client = client
         self.config = config
+        self.vision = vision
+        """Show the clips' frames to the model; turned off if it refuses images."""
+        self.vision_error: str | None = None
+        self.used_frames = False
+        """Whether any text in this run was written with frames (recorded in job.json)."""
         self.system = prompts.SYSTEM_PROMPT.format(
             title_max=TITLE_MAX,
             context_max=CONTEXT_MAX,
@@ -236,19 +279,54 @@ class LLMPostWriter:
 
     def write(self, clips: Sequence[ClipText], source: str = "") -> list[PostDraft]:
         """Text for ``clips``. ``source`` names the video they come from (e.g. its title
-        and channel), so the text can say what it is (the game, show or creator)."""
+        and channel), so the text can say what it is (the game, show or creator).
+
+        Clips with a ``frame`` are shown to the model (numbered images), while ``vision``
+        is on. If the model refuses images (not a vision model), the batch is retried
+        without them, ``vision`` turns off for the rest of the run and ``vision_error``
+        says why."""
         if not clips:
             return []
+        if self.vision and any(c.frame for c in clips):
+            try:
+                return self._write(clips, source, images=True)
+            except LLMError as e:
+                message = str(e)
+                if _TOO_LARGE.search(message) and len(clips) > 1:
+                    # A request-size cap (e.g. Groq's free tier: 7000 tokens per request):
+                    # fewer clips per call, still with their frames.
+                    half = len(clips) // 2
+                    return self.write(clips[:half], source) + self.write(clips[half:], source)
+                if not (_REFUSES_IMAGES.search(message) and not _TRANSIENT.search(message)):
+                    raise  # an outage, a timeout or Ctrl+C: not a reason to stop sending frames
+                self.vision, self.vision_error = False, message
+                log.warning("the model didn't take the clips' frames, writing from text: %s", e)
+        return self._write(clips, source, images=False)
+
+    def _write(self, clips: Sequence[ClipText], source: str, *, images: bool) -> list[PostDraft]:
         last = len(clips) - 1
-        lines = "\n\n".join(_format(i, c) for i, c in enumerate(clips))
+        frames: list[bytes] = []
+        lines = []
+        for i, clip in enumerate(clips):
+            number = None
+            if images and clip.frame:
+                frames.append(clip.frame)
+                number = len(frames)
+            lines.append(_format(i, clip, number))
         intro = f"Source video: {source}\n\n" if source else ""
-        original = prompts.USER_PROMPT.format(source=intro, first=0, last=last, clips=lines)
+        original = prompts.USER_PROMPT.format(
+            source=intro, first=0, last=last, clips="\n\n".join(lines)
+        )
         prompt = original
         attempts = self.config.max_retries + 1
         for _ in range(attempts):
-            raw = self.client.complete(self.system, prompt, json_schema=prompts.POSTS_SCHEMA)
+            raw = self.client.complete(
+                self.system, prompt, json_schema=prompts.POSTS_SCHEMA, images=frames
+            )
             try:
-                return parse_posts(raw, len(clips))
+                drafts = parse_posts(raw, len(clips))
+                self.used_frames = self.used_frames or bool(frames)
+                return drafts
             except InvalidPostsError as e:
                 error = e
                 prompt = prompts.RETRY_PROMPT.format(
@@ -270,13 +348,15 @@ def batches(clips: Sequence[ClipText], budget: int) -> list[range]:
     tokens. A clip too long for the budget alone gets a batch of its own."""
     room = max(budget - _PROMPT_TOKENS, 1)
     result: list[range] = []
-    start, used = 0, 0
+    start, used, images = 0, 0, 0
     for i, clip in enumerate(clips):
-        cost = approx_tokens(_format(i, clip)) + _ANSWER_TOKENS_PER_CLIP
-        if i > start and used + cost > room:
+        image = 1 if clip.frame else 0
+        cost = approx_tokens(_format(i, clip)) + _ANSWER_TOKENS_PER_CLIP + image * IMAGE_TOKENS
+        if i > start and (used + cost > room or images + image > MAX_IMAGES):
             result.append(range(start, i))
-            start, used = i, 0
+            start, used, images = i, 0, 0
         used += cost
+        images += image
     if start < len(clips):
         result.append(range(start, len(clips)))
     return result
@@ -341,6 +421,11 @@ def update_posts(
         texts = [
             clip_text(transcript, clips[i], summaries.get(clips[i].topic_title, "")) for i in todo
         ]
+        if writer.vision:  # what's on screen, so the text can tell who is who (#129)
+            texts = [
+                replace(t, frame=clip_frame(job.clips_dir / names[i], clips[i].duration))
+                for t, i in zip(texts, todo, strict=True)
+            ]
         drafts: list[PostDraft] = []
         for group in batches(texts, resolve_max_tokens(chunk, writer.config)):
             drafts += writer.write([texts[k] for k in group], source_of(job))
@@ -367,6 +452,7 @@ def update_posts(
     job.write_posts(result)
     if todo:
         meta = job.read_meta()
-        meta.models["posts_prompt"] = writer.prompt_version
+        frames = "+frames" if writer.used_frames else ""
+        meta.models["posts_prompt"] = f"{writer.prompt_version}{frames}"
         job.write_meta(meta)
     return PostsUpdate(posts=result, written=[names[i] for i in todo], dropped=dropped)

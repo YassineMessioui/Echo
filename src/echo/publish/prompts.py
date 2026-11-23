@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-POSTS_PROMPT_VERSION = "posts-v3"
+POSTS_PROMPT_VERSION = "posts-v4"
 
 SYSTEM_PROMPT = """\
 You write the text that goes with short vertical clips (YouTube Shorts, TikTok, \
@@ -17,7 +17,14 @@ Instagram Reels) cut from a longer video: a game stream, a podcast, a show.
 You may get the source video (its title and channel), then numbered clips. Each \
 starts with its number, then the topic it covers, then what is said in it:
 [<clip number>] Topic: <topic title>. <topic summary>
+On screen: image <n>   (only when an image of the clip is attached)
 Said: <transcript text>
+
+Image <n> shows two moments of that clip side by side, as viewers see it. Use it to \
+know who is speaking and what happens: a cutscene shows the game's characters talking \
+(the words are theirs, not the streamer's); gameplay, maps and menus are the player \
+playing; the streamer's webcam may sit in a corner, and their face shows how they react. \
+The burned-in captions repeat the words. Trust the image over guesses from the words.
 
 First decide the context of the whole video, once:
 - "context_hashtags": 0 to {context_max} hashtags naming what the video is, so \

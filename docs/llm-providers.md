@@ -22,7 +22,7 @@ or on a **hosted API**. Pick one with `llm.provider` in `PipelineConfig`
   to go through a proxy.
 - Groq, OpenRouter, Gemini and Mistral have free tiers with rate limits. Free tiers
   change often, so check the provider's page. Some (e.g. Gemini's free tier) may
-  use your prompts to improve their models: transcripts are sent to the provider.
+  use your prompts to improve their models: transcripts are sent to the provider. `echo-clips posts` also sends **one frame of each clip** (as viewers see it, including a streamer's webcam) when the provider is hosted; `--no-frames` keeps them local.
 - Long transcripts are split into windows that go to the LLM **in parallel**:
   `llm.max_concurrency` at a time, by default 4 for hosted providers and 1 for Ollama
   (a local server queues requests anyway, and queued ones could reach `llm.timeout_s`).

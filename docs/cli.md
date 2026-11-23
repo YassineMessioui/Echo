@@ -100,6 +100,8 @@ Writes a title (at most 70 characters), a 1–3 line description and 3–5 hasht
 
 One LLM call covers as many clips as fit the model's window budget (usually the whole job on a hosted model). The LLM gets each clip's own transcript text and its topic, and invalid answers (too long, wrong hashtag count, missing clips) are sent back to it, like topic extraction.
 
+**Frames (#129):** with a hosted provider, each clip's transcript goes with **one frame of the clip** (two moments side by side, as viewers see it, including a streamer's webcam), so a vision model (e.g. Groq `qwen/qwen3.8-27b`, Gemini) can tell a game's cutscene from the streamer. Those frames are sent to the provider; `--no-frames` keeps them local (off by default with Ollama). A model that refuses images falls back to text, with a note.
+
 Running it again only writes text for clips that don't have any yet, so edits made in review are kept. `--regenerate` rewrites the text of clips still `pending`; approved and rejected clips are never touched. A post whose clip is gone after a re-run is dropped, unless it was already published.
 
 | Option | Default | Meaning |
