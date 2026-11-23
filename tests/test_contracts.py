@@ -535,3 +535,19 @@ def test_publisher_protocol_shape(tmp_path: Path):
     publisher: Publisher = FakePublisher()
     result = publisher.publish(tmp_path / "01-a.mp4", ClipPost(**_post()), PublishConfig())
     assert result.ok and result.privacy == "private"
+
+
+def test_webcam_config_defaults_and_validation():
+    """#126: on by default (auto), top-left, 40 % of the width."""
+    from echo.config import ClipConfig
+
+    config = ClipConfig()
+    assert (config.webcam, config.webcam_corner, config.webcam_size) == ("auto", "top-left", 0.4)
+    for bad in (
+        {"webcam": "on"},
+        {"webcam_corner": "middle"},
+        {"webcam_size": 0.1},
+        {"webcam_size": 0.7},
+    ):
+        with pytest.raises(ValidationError):
+            ClipConfig(**bad)
