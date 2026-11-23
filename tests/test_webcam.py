@@ -228,3 +228,58 @@ def test_webcam_is_kept_in_the_corner(tmp_path: Path):
     # The white border at the overlay's top-left corner, and the grey webcam inside.
     assert grey[TOP + 1, MARGIN + 50] > 200
     assert 100 < grey[TOP + 60, MARGIN + 60] < 160
+
+
+# --- review fixes (#134) ---------------------------------------------------------------------
+
+
+def test_offline_the_clips_are_cut_without_a_webcam(tmp_path, monkeypatch):
+    """No face model yet and no network: the webcam is skipped, the clip stage goes on."""
+    import echo.clip as clip_module
+    from echo.errors import ExternalToolError
+
+    def offline(*args, **kwargs):
+        raise ExternalToolError("could not download the face detection model")
+
+    monkeypatch.setattr(clip_module, "detect_webcams", offline)
+    boxes = clip_module._search_webcams(
+        tmp_path / "v.mp4", [ClipSpec.between("t", 0, 5)], (1920, 1080, 606), None, 0.5
+    )
+    assert boxes == [None]
+
+
+def test_a_webcam_inside_the_crop_is_not_shown_twice():
+    from echo.webcam import inside_crop
+
+    # A 606 px centre crop of 1920 spans x 0.342-0.658.
+    assert inside_crop(Box(0.45, 0.8, 0.1, 0.15), 1920, 606, 0.5)  # bottom-centre cam
+    assert not inside_crop(Box(0.03, 0.42, 0.17, 0.22), 1920, 606, 0.5)  # left cam
+    assert not inside_crop(Box(0.6, 0.1, 0.1, 0.1), 1920, 606, 0.5)  # half outside
+
+
+def test_a_box_much_taller_than_wide_is_cut_back_around_the_face():
+    """A still name plate under the cam would make the box grow down: max 1:1."""
+    frames = stream_frames()
+    for f in frames:  # a still "name plate" right under the webcam
+        x, y, w, h = CAM
+        f[y + h : y + h + 120, x - 2 : x + w + 2] = 30
+    box = webcam_box(webcam_face(), frames)
+    assert box.h * H <= box.w * W + 1
+    face = webcam_face()
+    assert box.contains(face.cx, face.cy)
+
+
+def test_a_tall_webcam_stays_above_the_captions():
+    config = ClipConfig(webcam_size=0.6, webcam_corner="top-left")
+    graph = overlay_filter("null", Box(0.0, 0.0, 0.1, 0.4), 1920, 1080, config)
+    ow, oh = (int(v) for v in graph.split("scale=")[1].split(":")[:2])
+    assert TOP + oh + 2 * BORDER <= 1440
+    assert ow < 648  # shrunk from 0.6 * 1080 to keep the shape
+
+
+def test_non_square_pixels_keep_the_webcam_shape():
+    """Anamorphic 1440x1080 stored as 4:3 pixels: the cam's display aspect is used."""
+    box = Box(0.0, 0.0, 0.25, 0.25)  # 360x270 stored = 480x270 displayed (16:9)
+    graph = overlay_filter("null", box, 1440, 1080, ClipConfig(), sar=4 / 3)
+    ow, oh = (int(v) for v in graph.split("scale=")[1].split(":")[:2])
+    assert abs(ow / oh - 16 / 9) < 0.02

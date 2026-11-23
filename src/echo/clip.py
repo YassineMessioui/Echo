@@ -36,7 +36,7 @@ from echo import progress
 from echo.captions import CaptionStyle, build_ass, chain_filters, subtitles_filter
 from echo.config import ClipConfig, PipelineConfig
 from echo.download import video_source
-from echo.errors import ArtifactError, ExternalToolError, InvalidInputError
+from echo.errors import ArtifactError, EchoError, ExternalToolError, InvalidInputError
 from echo.faces import FaceDetector, default_detector
 from echo.ffmpeg import ffmpeg, has_filter, http_options
 from echo.framing import frame_crop
@@ -45,7 +45,7 @@ from echo.job import Job, _atomic_write
 from echo.models import ClipSpec, Speakers, StageName
 from echo.reframe import crop_window, frame_geometry, video_filter_for
 from echo.reframe import video_filter as reframe_filter
-from echo.webcam import Box, ExcludingDetector, detect_webcams, overlay_filter
+from echo.webcam import Box, ExcludingDetector, detect_webcams, inside_crop, overlay_filter
 
 log = logging.getLogger(__name__)
 
@@ -197,7 +197,7 @@ def cut_clips(
     if webcams is None:
         webcams = [None] * len(clips)
         if webcam and window is not None:
-            webcams = _search_webcams(video, clips, window, detector)
+            webcams = _search_webcams(video, clips, window, detector, config.crop_x)
     elif not webcam:
         webcams = [None] * len(clips)
     for clip, out, box in zip(clips, outputs, webcams, strict=True):
@@ -217,7 +217,7 @@ def cut_clips(
                 log.info("face framing took %.1f s: crop x = %s", time.monotonic() - started, x)
                 clip_filter = reframe_filter(width, height, config, sar=sar, crop_x_expr=x)
             if box is not None and clip_filter is not None:
-                clip_filter = overlay_filter(clip_filter, box, width, height, config)
+                clip_filter = overlay_filter(clip_filter, box, width, height, config, sar=sar)
         _cut_one(video, clip, out, config, chain_filters(clip_filter, extra_filter))
 
 
@@ -229,16 +229,25 @@ def _search_webcams(
     clips: Sequence[ClipSpec],
     window: tuple[int, int, int],
     detector: FaceDetector | None,
+    crop_x: float,
 ) -> list[Box | None]:
     started = time.monotonic()
-    boxes = detect_webcams(
-        lambda t: video_input_args(video, t, exact=False),
-        [(c.start, c.duration) for c in clips],
-        *window[:2],
-        detector or default_detector(),
-    )
+    try:
+        boxes = detect_webcams(
+            lambda t: video_input_args(video, t, exact=False),
+            [(c.start, c.duration) for c in clips],
+            *window[:2],
+            detector or default_detector(),
+        )
+    except EchoError as e:
+        # The webcam is a bonus: offline (no face model yet) or a failed sample must not
+        # stop the clips from being cut.
+        log.warning("no webcam search (%s); cutting without one (--no-webcam skips it)", e)
+        return [None] * len(clips)
     log.info("webcam search took %.1f s for %d clips", time.monotonic() - started, len(clips))
-    return boxes
+    # A webcam already inside the centre crop is in the clip anyway: no second copy.
+    width, _, crop_w = window
+    return [None if b is not None and inside_crop(b, width, crop_w, crop_x) else b for b in boxes]
 
 
 def find_webcams(
@@ -259,7 +268,7 @@ def find_webcams(
     window = crop_window(geometry[0], geometry[1], sar=geometry[2])
     if window is None:
         return [None] * len(clips)
-    return _search_webcams(video, clips, window, detector)
+    return _search_webcams(video, clips, window, detector, config.crop_x)
 
 
 MANIFEST = "manifest.json"
@@ -404,6 +413,8 @@ class ClipStage:
         # A stream's webcam (#126) is searched in all clips at once, so every clip gets the
         # same, consolidated box. Only the built-in clipper takes it.
         webcams: list[Box | None] = [None] * len(clips)
+        # The consolidated box depends on all clips but isn't fingerprinted: adding a clip
+        # can shift it a little without re-cutting its up-to-date siblings. That's fine.
         if any(todo) and self.clipper is cut_clips:
             webcams = find_webcams(video(), clips, config.clip)
 

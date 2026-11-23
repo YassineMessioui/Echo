@@ -74,11 +74,15 @@ TYPICAL_WIDTH = 3.4
 """Webcam width in face widths when an edge can't be found (a face fills ~30 % of a
 typical webcam's width)."""
 TYPICAL_ASPECT = 4 / 3
+MAX_TALL = 1.0
+"""A webcam box is at most as tall as it is wide (most are 16:9 or 4:3)."""
+CAPTIONS_TOP = 1440
+"""The webcam never reaches below this line of the 1080x1920 clip (captions start ~1500)."""
 
 MARGIN = 36
 """Pixels between the webcam and the clip's sides."""
-TOP = 150
-"""Top corners: pixels from the top (clear of the platforms' top bar)."""
+TOP = 250
+"""Top corners: pixels from the top (clear of the platforms' top UI, ~250 px on Reels)."""
 BOTTOM = 600
 """Bottom corners: pixels from the bottom (above the captions, 420 px up)."""
 BORDER = 4
@@ -189,6 +193,12 @@ def webcam_box(face: Face, frames: Sequence[np.ndarray]) -> Box:
     y0 = top + 1 if top is not None else fy - th * 0.45
     y1 = bottom if bottom is not None else fy + th * 0.55
     x0, y0, x1, y1 = max(x0, 0), max(y0, 0), min(x1, w), min(y1, h)
+    # Webcams are landscape-ish: a box much taller than that grew over a still name
+    # plate or alert box under the cam, so it's cut back around the face.
+    if y1 - y0 > MAX_TALL * (x1 - x0):
+        keep = MAX_TALL * (x1 - x0)
+        y0 = min(max(y0, fy - keep * 0.45), y1 - keep)
+        y1 = y0 + keep
     return Box(x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h)
 
 
@@ -279,18 +289,32 @@ def _even(n: float) -> int:
     return max(2, int(round(n)) // 2 * 2)
 
 
-def overlay_filter(framing: str, box: Box, width: int, height: int, config: ClipConfig) -> str:
+def inside_crop(box: Box, width: int, crop_w: int, crop_x: float) -> bool:
+    """Whether ``box`` already shows in a centre crop of ``crop_w`` px (at ``crop_x``) of
+    a ``width`` px frame: then the clip has the webcam anyway, and an overlay would show it
+    twice."""
+    left = crop_x * (width - crop_w) / width
+    return left <= box.x and box.x + box.w <= left + crop_w / width
+
+
+def overlay_filter(
+    framing: str, box: Box, width: int, height: int, config: ClipConfig, *, sar: float = 1.0
+) -> str:
     """``-vf`` graph: the clip framed by ``framing`` (a 1080x1920 filter chain), with the
-    webcam ``box`` of the ``width`` x ``height`` source laid over a corner."""
+    webcam ``box`` of the ``width`` x ``height`` source (pixels of shape ``sar``) laid
+    over a corner, kept above the captions."""
     cw, ch = _even(box.w * width), _even(box.h * height)
     cx = min(max(0, _even(box.x * width)), width - cw)
     cy = min(max(0, _even(box.y * height)), height - ch)
     ow = _even(TARGET[0] * config.webcam_size)
-    oh = _even(ow * ch / cw)
+    oh = _even(ow * ch / (cw * sar))
+    top = config.webcam_corner.startswith("top")
+    room = CAPTIONS_TOP - TOP - 2 * BORDER if top else TARGET[1] - BOTTOM - TOP - 2 * BORDER
+    if oh > room:  # a tall webcam at a big size: shrink it to stay above the captions
+        ow, oh = _even(ow * room / oh), _even(room)
     fw, fh = ow + 2 * BORDER, oh + 2 * BORDER
-    left = "left" in config.webcam_corner
-    x = MARGIN if left else TARGET[0] - fw - MARGIN
-    y = TOP if config.webcam_corner.startswith("top") else TARGET[1] - fh - BOTTOM
+    x = MARGIN if "left" in config.webcam_corner else TARGET[0] - fw - MARGIN
+    y = TOP if top else TARGET[1] - fh - BOTTOM
     return (
         f"split=2[echo_bg][echo_cam];[echo_bg]{framing}[echo_frame];"
         f"[echo_cam]crop={cw}:{ch}:{cx}:{cy},scale={ow}:{oh}:flags=lanczos,"
