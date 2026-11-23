@@ -170,7 +170,7 @@ def test_crop_window_matches_video_filter():
     assert crop_window(1080, 1080) is None, "padded, not cropped"
     assert crop_window(1440, 1080, sar=4 / 3) == (1920, 1080, 606)
     vf = video_filter(1920, 1080, ClipConfig(), crop_x_expr="10+5*gte(t\\,1.000)")
-    assert vf == "crop=606:1080:10+5*gte(t\\,1.000):0,scale=1080:1920,setsar=1"
+    assert vf == "crop=606:1080:10+5*gte(t\\,1.000):0,scale=1080:1920:flags=lanczos,setsar=1"
 
 
 # --- YuNet decoding + model download -----------------------------------------------------
