@@ -154,6 +154,46 @@ def test_job_id_of_another_video_is_rejected(tmp_path):
         )
 
 
+# --- "Most replayed" heatmap (#123) -----------------------------------------------------
+
+HEATMAP = [
+    {"start_time": 6.15, "end_time": 12.3, "value": 1.0},
+    {"start_time": 0.0, "end_time": 6.15, "value": 0.25},
+]
+
+
+def test_link_with_a_heatmap_saves_it_sorted(tmp_path):
+    job = job_from_url(tmp_path, URL, ydl_factory=factory(info=INFO | {"heatmap": HEATMAP}))
+    points = job.read_heatmap().points
+    assert [(p.start, p.end, p.value) for p in points] == [(0.0, 6.15, 0.25), (6.15, 12.3, 1.0)]
+
+
+@pytest.mark.parametrize(
+    "heatmap",
+    [None, [], [{"start_time": 0, "end_time": 5}], [{"start_time": 5, "end_time": 1, "value": 1}]],
+)
+def test_missing_or_malformed_heatmap_saves_nothing(tmp_path, heatmap):
+    info = INFO if heatmap is None else INFO | {"heatmap": heatmap}
+    job = job_from_url(tmp_path, URL, ydl_factory=factory(info=info))
+    assert job.input_video.is_file() and not job.heatmap_path.exists()
+
+
+def test_existing_link_job_gets_the_heatmap_when_reopened(tmp_path):
+    """The probe already ran on every reopen, so an old job picks it up for free."""
+    job = job_from_url(tmp_path, URL, ydl_factory=factory())
+    assert not job.heatmap_path.exists()
+    calls: list[tuple[str, str]] = []
+    info = INFO | {"heatmap": HEATMAP}
+    job_from_url(tmp_path, URL, ydl_factory=factory(calls, info=info))
+    assert calls == [("probe", URL)], "no extra request, no download"
+    assert len(job.read_heatmap().points) == 2
+
+    # A saved heatmap is kept (its scores stay consistent with it).
+    changed = INFO | {"heatmap": [HEATMAP[1] | {"value": 1.0}]}
+    job_from_url(tmp_path, URL, ydl_factory=factory(info=changed))
+    assert len(job.read_heatmap().points) == 2
+
+
 def test_local_file_job_id_is_rejected_for_a_url(tmp_path):
     video = tmp_path / "a.mp4"
     video.write_bytes(b"x")

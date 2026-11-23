@@ -89,6 +89,14 @@ clips (5, best first):
         ...
 ```
 
+For a YouTube link with a "Most replayed" graph (#123), each line also shows the clip's
+replay score (5 = the video's median, 10 = its peak), which is blended into the overall
+score with `ScoreConfig.replay_weight` (0.3):
+
+```
+   7.0  replay  6.2  jobs/youtube-qnwwyALyMbM/clips/05-intense-minecraft-battle-and-lava-chaos.mp4
+```
+
 On failure it prints the stage and
 error message (no traceback unless `--verbose`).
 

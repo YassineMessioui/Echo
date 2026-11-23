@@ -323,6 +323,37 @@ def test_lists_clips_best_first_with_scores(fake, video, jobs_dir, monkeypatch):
     ]
 
 
+def test_lists_replay_scores_for_links_with_a_heatmap(fake, video, jobs_dir, monkeypatch):
+    """With a "Most replayed" graph (#123), each clip also shows its replay score."""
+    fake.write_clips = True
+    _with_golden_scores(fake)
+    run_and_score = fake.run_pipeline
+
+    def with_replay(job, *args, **kwargs):
+        meta = run_and_score(job, *args, **kwargs)
+        sleep, solar = job.read_scores()[1], job.read_scores()[0]
+        job.write_scores(
+            [
+                solar.model_copy(update={"score": solar.score.model_copy(update={"replay": 8.1})}),
+                sleep,
+            ]
+        )
+        return meta
+
+    monkeypatch.setattr(cli, "run_pipeline", with_replay)
+    result = run(video, jobs_dir, "--job-id", "ep42")
+    assert result.exit_code == 0, result.output
+    job = Job(jobs_dir / "ep42")
+    lines = result.stdout.splitlines()
+    start = lines.index("clips (2, best first):")
+    sleep, solar = (
+        job.clip_video_path(2, "Sleep and productivity"),
+        job.clip_video_path(1, "Solar power is now the cheapest electricity"),
+    )
+    assert lines[start + 1] == f"   7.6  replay    -  {sleep}"
+    assert lines[start + 3] == f"   6.2  replay  8.1  {solar}"
+
+
 def test_no_score_lists_clips_in_time_order(fake, video, jobs_dir, monkeypatch):
     fake.write_clips = True
     _with_golden_scores(fake)

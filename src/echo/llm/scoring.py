@@ -9,6 +9,10 @@ As with topic extraction, the LLM never sees or returns times: clips are numbere
 lines, and it answers with those numbers. As many clips go in one call as fit the
 model's window budget (one call for an hour-long podcast on a long-context model), so
 they're rated side by side on the same scale.
+
+Link jobs with YouTube's "Most replayed" graph (``heatmap.json``, #123) also get a
+``replay`` score per clip (``replay_score``), blended into ``overall`` with
+``ScoreConfig.replay_weight``. Without a heatmap, nothing changes.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ import hashlib
 import json
 import math
 import re
+import statistics
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -30,7 +35,7 @@ from echo.interfaces import ClipScorer, LLMClient
 from echo.job import Job
 from echo.llm import prompts
 from echo.llm.chunking import approx_tokens, resolve_max_tokens
-from echo.models import Score, Segment, StageName, Topic
+from echo.models import ReplayHeatmap, Score, Segment, StageName, Topic
 
 CRITERIA = ("hook", "payoff", "clarity", "energy")
 
@@ -46,17 +51,67 @@ def overall(values: Mapping[str, float]) -> float:
     return round(sum(WEIGHTS[c] * values[c] for c in CRITERIA), 2)
 
 
+def _clip_segments(segments: list[Segment], topic: Topic, max_duration: float) -> list[Segment]:
+    """``topic``'s segments from the start, up to ``max_duration`` seconds (refine trims
+    long topics from the end). At least the first segment."""
+    first = segments[topic.start_segment]
+    kept = [first]
+    for seg in segments[topic.start_segment + 1 : topic.end_segment + 1]:
+        if seg.end - first.start > max_duration:
+            break
+        kept.append(seg)
+    return kept
+
+
 def clip_text(segments: list[Segment], topic: Topic, max_duration: float) -> str:
     """The transcript text of ``topic`` as a clip: its segments from the start, up to
     ``max_duration`` seconds (refine trims long topics from the end, so this is what
     the clip says). At least the first segment."""
-    first = segments[topic.start_segment]
-    parts = [first.text.strip()]
-    for seg in segments[topic.start_segment + 1 : topic.end_segment + 1]:
-        if seg.end - first.start > max_duration:
-            break
-        parts.append(seg.text.strip())
+    parts = (seg.text.strip() for seg in _clip_segments(segments, topic, max_duration))
     return " ".join(p for p in parts if p)
+
+
+def clip_span(segments: list[Segment], topic: Topic, max_duration: float) -> tuple[float, float]:
+    """The ``[start, end]`` (original-video time) of the text ``clip_text`` returns."""
+    kept = _clip_segments(segments, topic, max_duration)
+    return kept[0].start, kept[-1].end
+
+
+def replay_score(heatmap: ReplayHeatmap, start: float, end: float) -> float | None:
+    """How much viewers rewatch ``[start, end]``, 0–10: the time-weighted mean heatmap
+    value over the span (points cut at its edges count for their overlap), mapped
+    piecewise-linearly so 0 is 0, the video's median is 5 and its peak is 10. None
+    when the span doesn't overlap the heatmap.
+
+    Relative to the median, not absolute, because YouTube scales each video's graph to
+    its own peak: a 0.4 is busy in one video and quiet in another.
+    """
+    covered = weighted = 0.0
+    for p in heatmap.points:
+        overlap = min(end, p.end) - max(start, p.start)
+        if overlap > 0:
+            covered += overlap
+            weighted += overlap * p.value
+    if covered <= 0:
+        return None
+    mean = weighted / covered
+    values = [p.value for p in heatmap.points]
+    median, peak = statistics.median(values), max(values)
+    if mean >= median:
+        replay = 5 + 5 * (mean - median) / (peak - median) if peak > median else 5.0
+    else:
+        replay = 5 * mean / median
+    return round(min(max(replay, 0.0), 10.0), 2)
+
+
+def blend(score: Score, replay: float | None, weight: float) -> Score:
+    """``score`` with ``replay`` set and ``overall = (1 - weight) * llm + weight * replay``;
+    unchanged when ``replay`` is None."""
+    if replay is None:
+        return score
+    llm = overall({c: getattr(score, c) for c in CRITERIA})
+    mixed = round((1 - weight) * llm + weight * replay, 2)
+    return score.model_copy(update={"overall": mixed, "replay": replay})
 
 
 class InvalidScoresError(ValueError):
@@ -207,10 +262,12 @@ def _interruptible[T](fn: Callable[[], T], close: Callable[[], object] | None) -
     return result[0]
 
 
-def settings_fingerprint(config: PipelineConfig) -> str:
+def settings_fingerprint(config: PipelineConfig, job: Job | None = None) -> str:
     """What ``scores.json`` depends on besides ``topics.json``: the prompt, the model,
-    the clip length the text is cut to, and the batch budget."""
-    data = {
+    the clip length the text is cut to, and the batch budget; with a heatmap (#123),
+    also that there is one and the blend weight. Without one it's the same as before
+    #123, so jobs without a heatmap aren't re-scored."""
+    data: dict[str, Any] = {
         "prompt": prompts.SCORE_PROMPT_VERSION,
         "provider": config.llm.provider,
         "model": config.llm.model,
@@ -218,6 +275,8 @@ def settings_fingerprint(config: PipelineConfig) -> str:
         "max_duration": config.refine.max_duration,
         "budget": resolve_max_tokens(config.chunk, config.llm),
     }
+    if job is not None and job.heatmap_path.is_file():
+        data |= {"heatmap": True, "replay_weight": config.score.replay_weight}
     digest = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:12]
     return f"{prompts.SCORE_PROMPT_VERSION}|{config.llm.provider}/{config.llm.model}|{digest}"
 
@@ -227,8 +286,9 @@ class ScoreStage:
     """Stage adapter: ``transcript.json`` + ``topics.json`` → ``scores.json`` (#21).
 
     Optional: built only when ``ScoreConfig.enabled``. Its ``settings`` fingerprint
-    (``settings_fingerprint``) re-scores an existing job when the prompt, the model or
-    ``refine.max_duration`` change, without re-extracting topics. ``models`` is recorded
+    (``settings_fingerprint``) re-scores an existing job when the prompt, the model,
+    ``refine.max_duration`` or, with a heatmap, ``score.replay_weight`` change (or a
+    heatmap appears), without re-extracting topics. ``models`` is recorded
     in ``job.json`` (``{"score_prompt": "scores-v1"}``).
     """
 
@@ -242,8 +302,8 @@ class ScoreStage:
     def outputs(self, job: Job) -> list[Path]:
         return [job.scores_path]
 
-    def settings(self, config: PipelineConfig) -> str:
-        return settings_fingerprint(config)
+    def settings(self, config: PipelineConfig, job: Job) -> str:
+        return settings_fingerprint(config, job)
 
     def run(self, job: Job, config: PipelineConfig) -> None:
         transcript = job.read_transcript()
@@ -264,6 +324,13 @@ class ScoreStage:
                 lambda batch=batch: self.scorer.score(batch), getattr(self.scorer, "close", None)
             )
             progress.report(done / len(groups), f"batch {done}/{len(groups)}")
+        if job.heatmap_path.is_file():  # a link with a "Most replayed" graph (#123)
+            heatmap, weight = job.read_heatmap(), config.score.replay_weight
+            spans = [clip_span(segments, t, config.refine.max_duration) for t in topics]
+            scores = [
+                blend(s, replay_score(heatmap, *span), weight)
+                for s, span in zip(scores, spans, strict=True)
+            ]
         job.write_scores(
             [t.model_copy(update={"score": s}) for t, s in zip(topics, scores, strict=True)]
         )
