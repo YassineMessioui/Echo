@@ -574,9 +574,16 @@ def _print_clips(clips: list[ClipSpec], paths: list[Path], scores: dict[str, Sco
         zip(clips, paths, strict=True),
         key=lambda row: -(s.overall if (s := scores.get(row[0].topic_title)) else -1.0),
     )
+    # Link jobs with a "Most replayed" graph (#123) also show each clip's replay score.
+    replays = any(s.replay is not None for s in scores.values())
     for clip, path in rows:
         score = scores.get(clip.topic_title)
-        typer.echo(f"  {score.overall:4.1f}  {path}" if score else f"     -  {path}")
+        replay = ""
+        if replays:
+            value = score.replay if score else None
+            replay = f"replay {value:4.1f}  " if value is not None else "replay    -  "
+        overall = f"{score.overall:4.1f}" if score else "   -"
+        typer.echo(f"  {overall}  {replay}{path}")
         if score and score.reason:
             typer.echo(f"        {score.reason}")
 

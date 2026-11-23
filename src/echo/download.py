@@ -26,12 +26,13 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
+from pydantic import ValidationError
 from yt_dlp.utils import DownloadError
 
 from echo.errors import ArtifactError, InvalidInputError
 from echo.interfaces import RemoteVideo
 from echo.job import Job
-from echo.models import JobMeta
+from echo.models import HeatmapPoint, JobMeta, ReplayHeatmap
 from echo.progress import report
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,8 @@ class VideoInfo:
     duration: float | None = None
     video_protocol: str | None = None
     """Protocol of the ``VIDEO_FORMAT`` stream; decides remote vs full download."""
+    heatmap: ReplayHeatmap | None = None
+    """YouTube's "Most replayed" graph (#123), when the video has one."""
 
     @property
     def seekable(self) -> bool:
@@ -168,7 +171,24 @@ def probe_url(url: str, *, ydl_factory: YDLFactory = _default_factory) -> VideoI
         uploader=info.get("uploader"),
         duration=info.get("duration"),
         video_protocol=_video_format(info).get("protocol"),
+        heatmap=_heatmap(info),
     )
+
+
+def _heatmap(info: dict[str, Any]) -> ReplayHeatmap | None:
+    """yt-dlp's ``info["heatmap"]`` (``{start_time, end_time, value}`` points), or None
+    when it's missing, empty or malformed: scoring then works as without one."""
+    raw = info.get("heatmap")
+    if not raw:
+        return None
+    try:
+        points = [
+            HeatmapPoint(start=p["start_time"], end=p["end_time"], value=p["value"]) for p in raw
+        ]
+        return ReplayHeatmap(points=sorted(points, key=lambda p: p.start))
+    except (KeyError, TypeError, ValidationError) as e:
+        logger.warning("ignoring the video's replay heatmap: %s", e)
+        return None
 
 
 def _extract(url: str, ydl_factory: YDLFactory) -> dict[str, Any]:
@@ -305,6 +325,8 @@ def job_from_url(
         if previous != (info.extractor, info.id):
             raise InvalidInputError(f"job {job.job_id!r} was created for {meta.source}, not {url}")
     job.root.mkdir(parents=True, exist_ok=True)
+    if info.heatmap is not None and not job.heatmap_path.exists():  # #123; old jobs too
+        job.write_heatmap(info.heatmap)
     if not (job.input_video.exists() or job.input_audio.exists()):
         if info.seekable:
             out, format_spec = job.input_audio, AUDIO_FORMAT
