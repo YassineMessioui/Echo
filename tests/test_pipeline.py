@@ -103,7 +103,7 @@ def test_from_stage_reruns_that_stage_and_later_ones(job: Job) -> None:
     run_pipeline(job, fake_stages(log), CONFIG)
     log.clear()
     meta = run_pipeline(job, fake_stages(log), CONFIG, from_stage=StageName.LLM)
-    assert log == [StageName.LLM, StageName.REFINE, StageName.CLIP]
+    assert log == [StageName.LLM, StageName.SCORE, StageName.REFINE, StageName.CLIP]
     assert meta.stages[StageName.INGEST].status == StageStatus.SKIPPED
     assert meta.stages[StageName.TRANSCRIBE].status == StageStatus.SKIPPED
     assert meta.stages[StageName.LLM].status == StageStatus.DONE
@@ -254,6 +254,7 @@ def test_rerun_after_failure_resumes_at_failed_stage(job: Job) -> None:
         StageName.TRANSCRIBE: StageStatus.SKIPPED,
         StageName.DIARIZE: StageStatus.SKIPPED,
         StageName.LLM: StageStatus.SKIPPED,
+        StageName.SCORE: StageStatus.SKIPPED,
         StageName.REFINE: StageStatus.DONE,
         StageName.CLIP: StageStatus.DONE,
     }
@@ -274,8 +275,10 @@ def test_build_stages_is_lazy(monkeypatch: pytest.MonkeyPatch, job: Job) -> None
 
     stages = build_stages(PipelineConfig(llm={"provider": "groq"}))  # no API key needed yet
 
-    # Diarization is optional and off by default, so it isn't built (#22).
-    assert [s.name for s in stages] == [n for n in StageName if n is not StageName.DIARIZE]
+    # Diarization is optional and off by default, so it isn't built (#22); the score
+    # stage (#21) isn't built yet.
+    optional = (StageName.DIARIZE, StageName.SCORE)
+    assert [s.name for s in stages] == [n for n in StageName if n not in optional]
     assert [type(s) for s in stages] == [
         IngestStage,
         TranscribeStage,
@@ -323,7 +326,7 @@ def test_a_stage_that_reruns_forces_later_stages(job: Job) -> None:
     (job.root / f"{StageName.LLM}.out").unlink()
     log.clear()
     run_pipeline(job, fake_stages(log), CONFIG)
-    assert log == [StageName.LLM, StageName.REFINE, StageName.CLIP]
+    assert log == [StageName.LLM, StageName.SCORE, StageName.REFINE, StageName.CLIP]
     assert statuses(job)[StageName.TRANSCRIBE] == StageStatus.SKIPPED
 
 

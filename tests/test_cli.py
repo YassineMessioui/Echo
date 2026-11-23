@@ -22,7 +22,11 @@ GOLDEN_CLIPS = Path(__file__).parent / "fixtures" / "golden" / "clips.json"
 runner = CliRunner(env={"COLUMNS": "200", "NO_COLOR": "1", "TERM": "dumb"})
 
 
-FAKE_STAGES = [SimpleNamespace(name=name) for name in StageName if name is not StageName.DIARIZE]
+FAKE_STAGES = [
+    SimpleNamespace(name=name)
+    for name in StageName
+    if name not in (StageName.DIARIZE, StageName.SCORE)
+]
 """What the fake ``build_stages`` returns: only ``name`` is read by the CLI."""
 
 
