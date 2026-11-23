@@ -41,7 +41,7 @@ resumes that job instead of downloading it again. YouTube needs a JavaScript run
 | `--background [blur\|black]` | `blur` | `ClipConfig.background` |
 | `--captions / --no-captions` | on | `CaptionConfig.enabled` (burned-in, word-highlighted) |
 | `--speakers / --no-speakers` | off | `DiarizeConfig.enabled`: detect who speaks when (`speakers.json`); captions get a colour per speaker. Adds ~5 min of CPU per hour of audio; the models (~46 MB) download once to `~/.cache/echo/models` (`ECHO_MODELS_DIR`) |
-| `--num-speakers N` | estimate | `DiarizeConfig.num_speakers` |
+| `--num-speakers N` | estimate | `DiarizeConfig.num_speakers`: exactly N speakers. When estimating, speakers with similar voices are merged (`merge_threshold`) and speakers with under 2 % of the speech (laughter, "mm-hm") are folded into the nearest speaker in time (`min_speaker_share`) |
 | `-v, --verbose` | off | debug logging |
 
 Option defaults come from `PipelineConfig`, so the two can't drift. Hosted LLM providers

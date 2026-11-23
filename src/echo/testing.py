@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,7 @@ class LLMCall:
     system: str
     prompt: str
     json_schema: dict[str, Any] | None
+    images: tuple[bytes, ...] = ()
 
 
 class FakeLLMClient:
@@ -28,9 +29,14 @@ class FakeLLMClient:
         self.calls: list[LLMCall] = []
 
     def complete(
-        self, system: str, prompt: str, *, json_schema: dict[str, Any] | None = None
+        self,
+        system: str,
+        prompt: str,
+        *,
+        json_schema: dict[str, Any] | None = None,
+        images: Sequence[bytes] = (),
     ) -> str:
-        self.calls.append(LLMCall(system, prompt, json_schema))
+        self.calls.append(LLMCall(system, prompt, json_schema, tuple(images)))
         if not self._responses:
             raise LLMError("FakeLLMClient: no scripted responses left")
         return self._responses.pop(0)
