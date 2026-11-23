@@ -97,14 +97,22 @@ class RefineConfig(_Section):
     max_duration: float = Field(default=60.0, gt=0)
     padding: float = Field(default=0.2, ge=0)
     max_clips: int | None = Field(default=None, ge=1)
-    """Keep at most this many clips (None = all). Until clip scoring (#21) exists, the
-    ones closest to ~37 s are kept, in chronological order."""
+    """Keep at most this many clips (None = all), in chronological order: the highest
+    scored ones when topics have scores (#21), else the ones closest to ~37 s."""
 
     @model_validator(mode="after")
     def _range(self) -> "RefineConfig":
         if self.max_duration < self.min_duration:
             raise ValueError("max_duration < min_duration")
         return self
+
+
+class ScoreConfig(_Section):
+    """Clip scoring (#21): the LLM rates each topic's clip text for hook, payoff,
+    standalone clarity and energy, so ``RefineConfig.max_clips`` keeps the best ones."""
+
+    enabled: bool = True
+    """Off: no score stage, and ``max_clips`` keeps the clips closest to ~37 s."""
 
 
 class ClipConfig(_Section):
@@ -185,6 +193,7 @@ class PipelineConfig(_Section):
     transcribe: TranscribeConfig = TranscribeConfig()
     chunk: ChunkConfig = ChunkConfig()
     llm: LLMConfig = LLMConfig()
+    score: ScoreConfig = ScoreConfig()
     refine: RefineConfig = RefineConfig()
     clip: ClipConfig = ClipConfig()
     caption: CaptionConfig = CaptionConfig()
