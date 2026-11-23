@@ -52,9 +52,11 @@ from echo.llm.chunking import WindowChunker
 from echo.llm.client import make_llm_client
 from echo.llm.merge import LLMStage
 from echo.llm.prompts import PROMPT_VERSION
+from echo.llm.scoring import LLMClipScorer, ScoreStage
 from echo.llm.topics import LLMTopicExtractor
 from echo.models import (
     JobMeta,
+    Score,
     StageName,
     StageRecord,
     StageStatus,
@@ -109,12 +111,10 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
     ]
     if config.diarize.enabled:  # optional (#22); its models load only when it runs
         stages.append(DiarizeStage(SherpaDiarizer(config.diarize)))
-    return [
-        *stages,
-        LLMStage(WindowChunker(llm=config.llm), extractor, models=_LLMModels(extractor)),
-        RefineStage(),
-        ClipStage(),
-    ]
+    stages.append(LLMStage(WindowChunker(llm=config.llm), extractor, models=_LLMModels(extractor)))
+    if config.score.enabled:  # optional (#21); its client is built only when it runs
+        stages.append(ScoreStage(_LazyClipScorer(config.llm)))
+    return [*stages, RefineStage(), ClipStage()]
 
 
 class _LazyTranscriber:
@@ -162,6 +162,30 @@ class _LazyTopicExtractor:
 
     def close(self) -> None:
         """Close the client if it was built (Ctrl+C, #83); the next use builds a new one."""
+        with self._lock:
+            real, self._real = self._real, None
+        if real is not None:
+            real.close()
+
+
+class _LazyClipScorer:
+    """``ClipScorer`` that builds the LLM client on first use (see ``_LazyTopicExtractor``)."""
+
+    def __init__(self, config: LLMConfig) -> None:
+        self._config = config
+        self._real: LLMClipScorer | None = None
+        self._lock = threading.Lock()  # close() comes from the stage thread on Ctrl+C
+
+    def _get(self) -> LLMClipScorer:
+        with self._lock:
+            if self._real is None:
+                self._real = LLMClipScorer(make_llm_client(self._config), self._config)
+            return self._real
+
+    def score(self, clips: list[str]) -> list[Score]:
+        return self._get().score(clips)
+
+    def close(self) -> None:
         with self._lock:
             real, self._real = self._real, None
         if real is not None:

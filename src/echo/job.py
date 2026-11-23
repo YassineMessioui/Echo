@@ -7,6 +7,7 @@ jobs/<job_id>/
   transcript.json        # stage: transcribe
   speakers.json          # stage: diarize (optional, #22)
   topics.json            # stage: llm
+  scores.json            # stage: score (optional, #21): topics.json with scores
   clips.json             # stage: refine
   clips/<nn>-<slug>.mp4  # stage: clip
   clips/publish.json     # command: publish (#67): text, approval, results per clip
@@ -151,6 +152,11 @@ class Job:
         return self.root / "topics.json"
 
     @property
+    def scores_path(self) -> Path:
+        """The topics of ``topics.json``, same order and spans, with ``Topic.score`` set."""
+        return self.root / "scores.json"
+
+    @property
     def clips_path(self) -> Path:
         return self.root / "clips.json"
 
@@ -190,7 +196,14 @@ class Job:
         return self._read_list(self.topics_path, _TOPICS)
 
     def write_topics(self, topics: list[Topic]) -> None:
-        _atomic_write(self.topics_path, _TOPICS.dump_json(topics, indent=2))
+        # exclude_none: topics.json keeps its pre-#21 shape (no "score": null).
+        _atomic_write(self.topics_path, _TOPICS.dump_json(topics, indent=2, exclude_none=True))
+
+    def read_scores(self) -> list[Topic]:
+        return self._read_list(self.scores_path, _TOPICS)
+
+    def write_scores(self, topics: list[Topic]) -> None:
+        _atomic_write(self.scores_path, _TOPICS.dump_json(topics, indent=2))
 
     def read_clips(self) -> list[ClipSpec]:
         return self._read_list(self.clips_path, _CLIPS)
