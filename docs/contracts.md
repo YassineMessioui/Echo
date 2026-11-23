@@ -29,6 +29,7 @@ flowchart LR
 | #11 | clip | `echo/clip.py` | `Clipper` | `input.mp4` (or a `RemoteVideo` for links), `list[ClipSpec]` | `clips/<nn>-<slug>.mp4` |
 | #12 | orchestration | `echo/pipeline.py` | `Stage` adapters + runner | `Job` | `job.json` |
 | #13 | orchestration | `echo/cli.py` | Typer CLI | args | job directory |
+| #101 | post text (command `posts`) | `echo/publish/text.py` | `LLMPostWriter` | `clips.json`, `transcript.json`, `topics.json` | `ClipPost` text → `clips/publish.json` |
 | #67 | publish (a command, not a stage) | `echo/publish/` | `Publisher` (one per `Platform`) | `clips/<nn>-<slug>.mp4`, approved `ClipPost`s | `PublishResult` → `clips/publish.json` |
 
 ## Rules

@@ -79,6 +79,31 @@ plain lines, since its log lines would break a line redrawn in place.
 At the end it prints the job directory and the path of every clip. On failure it prints the stage and
 error message (no traceback unless `--verbose`).
 
+## `echo-clips posts JOB` (#101)
+
+Writes a title (at most 70 characters), a 1–3 line description and 3–5 hashtags for every clip of a finished job, into `clips/publish.json` (see the README), all `pending` review. **Nothing is posted.** `JOB` is a job directory or a job id in `--jobs-dir`.
+
+One LLM call covers as many clips as fit the model's window budget (usually the whole job on a hosted model). The LLM gets each clip's own transcript text and its topic, and invalid answers (too long, wrong hashtag count, missing clips) are sent back to it, like topic extraction.
+
+Running it again only writes text for clips that don't have any yet, so edits made in review are kept. `--regenerate` rewrites the text of clips still `pending`; approved and rejected clips are never touched. A post whose clip is gone after a re-run is dropped, unless it was already published.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--jobs-dir PATH` | `jobs` | where to look for a job id |
+| `--llm-provider`, `--llm-model` | as `run` | the LLM that writes the text |
+| `--regenerate` | off | rewrite the text of clips still pending review |
+| `--verbose`, `-v` | off | debug logging and full tracebacks |
+
+```
+posts: jobs/ep42/clips/publish.json
+  [new] 01-solar-power-is-now-the-cheapest-electricity.mp4
+        Solar power now the cheapest new electricity in Europe
+        #solar #renewableenergy #Europe #cleanenergy #electricity
+  [approved] 02-sleep-and-productivity.mp4
+        How losing just one hour of sleep hurts focus
+        #sleep #productivity #focus #health #wellbeing
+```
+
 ## Exit codes
 
 | Code | Meaning |
@@ -97,4 +122,5 @@ echo-clips run episode.mp4 --job-id ep42 --from-stage refine --max-duration 45
 echo-clips run episode.mp4 --llm-provider groq --llm-model openai/gpt-oss-120b
 echo-clips run episode.mp4 --aspect source
 echo-clips run episode.mp4 --range 15%:85%
+echo-clips posts ep42 --llm-provider groq   # text for each clip, nothing is posted
 ```
