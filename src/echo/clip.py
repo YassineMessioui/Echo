@@ -27,7 +27,7 @@ import logging
 import os
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
@@ -36,7 +36,7 @@ from echo import progress
 from echo.captions import CaptionStyle, build_ass, chain_filters, subtitles_filter
 from echo.config import ClipConfig, PipelineConfig
 from echo.download import video_source
-from echo.errors import ArtifactError, ExternalToolError, InvalidInputError
+from echo.errors import ArtifactError, EchoError, ExternalToolError, InvalidInputError
 from echo.faces import FaceDetector, default_detector
 from echo.ffmpeg import ffmpeg, has_filter, http_options
 from echo.framing import frame_crop
@@ -45,6 +45,7 @@ from echo.job import Job, _atomic_write
 from echo.models import ClipSpec, Speakers, StageName
 from echo.reframe import crop_window, frame_geometry, video_filter_for
 from echo.reframe import video_filter as reframe_filter
+from echo.webcam import Box, ExcludingDetector, detect_webcams, inside_crop, overlay_filter
 
 log = logging.getLogger(__name__)
 
@@ -68,9 +69,10 @@ def _remote_input_options() -> list[str]:
     return [arg for k, v in _REMOTE_OPTIONS.items() if k in supported for arg in (f"-{k}", v)]
 
 
-def video_input_args(video: Path | RemoteVideo, start: float) -> list[str]:
-    """ffmpeg arguments that open ``video`` as input 0, seeked exactly to ``start``."""
-    seek = ["-accurate_seek", "-ss", f"{start:.3f}"]
+def video_input_args(video: Path | RemoteVideo, start: float, *, exact: bool = True) -> list[str]:
+    """ffmpeg arguments that open ``video`` as input 0, seeked exactly to ``start`` (or,
+    with ``exact=False``, to the keyframe before it: much cheaper, for sampling)."""
+    seek = ["-accurate_seek" if exact else "-noaccurate_seek", "-ss", f"{start:.3f}"]
     if not isinstance(video, RemoteVideo):
         return [*seek, "-i", str(video)]
     # -headers puts them in ffmpeg's argv (visible in the process list). That's fine:
@@ -145,6 +147,7 @@ def cut_clips(
     extra_filter: str | None = None,
     speakers: Speakers | None = None,
     detector: FaceDetector | None = None,
+    webcams: Sequence[Box | None] | None = None,
 ) -> None:
     """Implements ``echo.interfaces.Clipper``.
 
@@ -174,38 +177,98 @@ def cut_clips(
             "can't be burned in. Install an ffmpeg build with libass, or turn captions off "
             "(--no-captions, or caption.enabled = false)."
         )
-    # Face framing (#16) replaces the fixed crop_x, on sources the 9:16 filter crops.
-    face = video_filter is None and config.aspect != "source" and config.reframe != "centre"
+    # Face framing (#16) replaces the fixed crop_x, on sources the 9:16 filter crops; a
+    # streamer's webcam overlay (#126) is kept in a corner of them.
+    framed = video_filter is None and config.aspect != "source"
+    face = framed and config.reframe != "centre"
+    webcam = framed and config.webcam == "auto"
     if video_filter is None and clips:
         if isinstance(video, RemoteVideo):
             video_filter = reframe_filter(video.width, video.height, config)
         else:
             video_filter = video_filter_for(video, config)
     geometry, window = None, None
-    if face and clips:
+    if (face or webcam) and clips:
         if isinstance(video, RemoteVideo):
             geometry = (video.width, video.height, 1.0)
         else:
             geometry = frame_geometry(video)
         window = crop_window(geometry[0], geometry[1], sar=geometry[2])
-    for clip, out in zip(clips, outputs, strict=True):
+    if webcams is None:
+        webcams = [None] * len(clips)
+        if webcam and window is not None:
+            webcams = _search_webcams(video, clips, window, detector, config.crop_x)
+    elif not webcam:
+        webcams = [None] * len(clips)
+    for clip, out, box in zip(clips, outputs, webcams, strict=True):
         clip_filter = video_filter
         if window is not None and geometry is not None:
-            started = time.monotonic()
-            x = frame_crop(
-                video_input_args(video, clip.start),
-                clip.duration,
-                *window,
-                config.crop_x,
-                detector or default_detector(),
-            )
-            log.info("face framing took %.1f s: crop x = %s", time.monotonic() - started, x)
             width, height, sar = geometry
-            clip_filter = reframe_filter(width, height, config, sar=sar, crop_x_expr=x)
+            found = detector or default_detector()
+            if face:
+                started = time.monotonic()
+                x = frame_crop(
+                    video_input_args(video, clip.start),
+                    clip.duration,
+                    *window,
+                    config.crop_x,
+                    found if box is None else ExcludingDetector(found, box),
+                )
+                log.info("face framing took %.1f s: crop x = %s", time.monotonic() - started, x)
+                clip_filter = reframe_filter(width, height, config, sar=sar, crop_x_expr=x)
+            if box is not None and clip_filter is not None:
+                clip_filter = overlay_filter(clip_filter, box, width, height, config, sar=sar)
         _cut_one(video, clip, out, config, chain_filters(clip_filter, extra_filter))
 
 
 _: Clipper = cut_clips
+
+
+def _search_webcams(
+    video: Path | RemoteVideo,
+    clips: Sequence[ClipSpec],
+    window: tuple[int, int, int],
+    detector: FaceDetector | None,
+    crop_x: float,
+) -> list[Box | None]:
+    started = time.monotonic()
+    try:
+        boxes = detect_webcams(
+            lambda t: video_input_args(video, t, exact=False),
+            [(c.start, c.duration) for c in clips],
+            *window[:2],
+            detector or default_detector(),
+        )
+    except EchoError as e:
+        # The webcam is a bonus: offline (no face model yet) or a failed sample must not
+        # stop the clips from being cut.
+        log.warning("no webcam search (%s); cutting without one (--no-webcam skips it)", e)
+        return [None] * len(clips)
+    log.info("webcam search took %.1f s for %d clips", time.monotonic() - started, len(clips))
+    # A webcam already inside the centre crop is in the clip anyway: no second copy.
+    width, _, crop_w = window
+    return [None if b is not None and inside_crop(b, width, crop_w, crop_x) else b for b in boxes]
+
+
+def find_webcams(
+    video: Path | RemoteVideo,
+    clips: Sequence[ClipSpec],
+    config: ClipConfig,
+    detector: FaceDetector | None = None,
+) -> list[Box | None]:
+    """The streamer's webcam in each clip (#126), consolidated over all of them (a
+    stream's webcam doesn't move), for ``cut_clips(webcams=...)``. All None when
+    ``config.webcam`` is off or the source isn't cropped to 9:16."""
+    if config.webcam != "auto" or config.aspect == "source" or not clips:
+        return [None] * len(clips)
+    if isinstance(video, RemoteVideo):
+        geometry = (video.width, video.height, 1.0)
+    else:
+        geometry = frame_geometry(video)
+    window = crop_window(geometry[0], geometry[1], sar=geometry[2])
+    if window is None:
+        return [None] * len(clips)
+    return _search_webcams(video, clips, window, detector, config.crop_x)
 
 
 MANIFEST = "manifest.json"
@@ -338,17 +401,34 @@ class ClipStage:
         def clip_done(done: int) -> None:  # skipped (up-to-date) clips count as done
             progress.report(done / len(clips), f"clip {done}/{len(clips)}")
 
+        tracks = [
+            build_ass(transcript, clip, style, speakers) if transcript is not None else None
+            for clip in clips
+        ]
+        entries = [_entry(clip, config.clip, ass) for clip, ass in zip(clips, tracks, strict=True)]
+        todo = [
+            self.force or not path.exists() or manifest.get(path.name) != entry
+            for path, entry in zip(paths, entries, strict=True)
+        ]
+        # A stream's webcam (#126) is searched in all clips at once, so every clip gets the
+        # same, consolidated box. Only the built-in clipper takes it.
+        webcams: list[Box | None] = [None] * len(clips)
+        # The consolidated box depends on all clips but isn't fingerprinted: adding a clip
+        # can shift it a little without re-cutting its up-to-date siblings. That's fine.
+        if any(todo) and self.clipper is cut_clips:
+            webcams = find_webcams(video(), clips, config.clip)
+
         for done, (clip, path) in enumerate(zip(clips, paths, strict=True), start=1):
-            ass = build_ass(transcript, clip, style, speakers) if transcript is not None else None
-            entry = _entry(clip, config.clip, ass)
-            if not self.force and path.exists() and manifest.get(path.name) == entry:
+            ass, entry = tracks[done - 1], entries[done - 1]
+            if not todo[done - 1]:
                 clip_done(done)
                 continue
+            more = {"webcams": [webcams[done - 1]]} if self.clipper is cut_clips else {}
             manifest.pop(path.name, None)
             ass_path = captions_path(path)
             if ass is None:
                 ass_path.unlink(missing_ok=True)
-                self.clipper(video(), [clip], [path], config.clip)
+                self.clipper(video(), [clip], [path], config.clip, **more)
             else:
                 # Burn from a temp file and move it into place only once the clip is cut,
                 # so a failed encode never leaves a .ass that doesn't match its .mp4.
@@ -361,6 +441,7 @@ class ClipStage:
                         [path],
                         config.clip,
                         extra_filter=subtitles_filter(tmp),
+                        **more,
                     )
                     os.replace(tmp, ass_path)
                 except BaseException:

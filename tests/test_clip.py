@@ -397,7 +397,9 @@ def test_extra_filter_is_chained_after_reframing(monkeypatch, tmp_path):
     monkeypatch.setattr(clip_module, "ffmpeg", lambda args: seen.append(args))
     monkeypatch.setattr(clip_module.os, "replace", lambda a, b: None)
     clip = ClipSpec.between("t", 0, 20)
-    cut_clips(video, [clip], [tmp_path / "o.mp4"], ClipConfig(), extra_filter="eq=gamma=1.1")
+    cut_clips(
+        video, [clip], [tmp_path / "o.mp4"], ClipConfig(webcam="off"), extra_filter="eq=gamma=1.1"
+    )
     args = seen[0]
     assert args[args.index("-vf") + 1] == "crop=1:1,scale=1080:1920,eq=gamma=1.1"
 
@@ -777,3 +779,52 @@ def test_changing_webcam_settings_recuts(job_copy, change):
     clipper = RecordingClipper()
     ClipStage(clipper=clipper).run(job, config)
     assert len(clipper.cut) == len(job.read_clips())
+
+
+# --- webcam in the clip stage (#126) ------------------------------------------------------
+
+
+def test_stage_searches_the_webcam_once_for_all_clips(job_copy, monkeypatch):
+    """All clips are searched together (a stream's webcam doesn't move, so the box is
+    consolidated), then each clip is cut with its own box laid over the frame."""
+    from echo.webcam import Box
+
+    job = _job_with_video(job_copy)
+    box = Box(0.03, 0.42, 0.17, 0.22)
+    searched: list[int] = []
+
+    def fake_find(video, clips, config, detector=None):
+        searched.append(len(clips))
+        return [box, None]
+
+    filters: list[str | None] = []
+    monkeypatch.setattr(clip_module, "find_webcams", fake_find)
+    monkeypatch.setattr(clip_module, "video_filter_for", lambda v, c: "crop=606:1080:657:0")
+    monkeypatch.setattr(clip_module, "frame_geometry", lambda v: (1920, 1080, 1.0))
+    monkeypatch.setattr(
+        clip_module,
+        "_cut_one",
+        lambda video, clip, out, config, vf: (filters.append(vf), out.write_bytes(b"x")),
+    )
+    ClipStage().run(job, PipelineConfig(caption={"enabled": False}))
+    assert searched == [2]
+    assert "overlay=" in filters[0] and "crop=326:238:58:454" in filters[0]
+    assert filters[1] == "crop=606:1080:657:0"  # no webcam in that clip
+    # Everything up to date: no search at all.
+    searched.clear()
+    ClipStage().run(job, PipelineConfig(caption={"enabled": False}))
+    assert searched == []
+
+
+def test_stage_with_webcam_off_searches_nothing(job_copy, monkeypatch):
+    job = _job_with_video(job_copy)
+    monkeypatch.setattr(clip_module, "video_filter_for", lambda v, c: "crop=606:1080:657:0")
+    filters: list[str | None] = []
+    monkeypatch.setattr(
+        clip_module,
+        "_cut_one",
+        lambda video, clip, out, config, vf: (filters.append(vf), out.write_bytes(b"x")),
+    )
+    config = PipelineConfig(caption={"enabled": False}, clip={"webcam": "off"})
+    ClipStage().run(job, config)
+    assert filters == ["crop=606:1080:657:0"] * 2

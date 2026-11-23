@@ -58,6 +58,8 @@ Aspect = _choices("Aspect", "aspect")
 Background = _choices("Background", "background")
 Reframe = _choices("Reframe", "reframe")
 _DEFAULT_REFRAME = Reframe(_D.clip.reframe)
+WebcamCorner = _choices("WebcamCorner", "webcam_corner")
+_DEFAULT_WEBCAM_CORNER = WebcamCorner(_D.clip.webcam_corner)
 _DEFAULT_ASPECT = Aspect(_D.clip.aspect)
 _DEFAULT_BACKGROUND = Background(_D.clip.background)
 
@@ -453,6 +455,17 @@ def run(
     background: Annotated[
         Background, typer.Option(help="Fill for sources narrower than 9:16.")
     ] = _DEFAULT_BACKGROUND,
+    webcam: Annotated[
+        bool,
+        typer.Option(
+            "--webcam/--no-webcam",
+            help="Streams: keep the streamer's webcam overlay in a corner of the clip "
+            "(found automatically; clips without one are unchanged).",
+        ),
+    ] = _D.clip.webcam == "auto",
+    webcam_corner: Annotated[
+        WebcamCorner, typer.Option(help="Where the webcam goes.")
+    ] = _DEFAULT_WEBCAM_CORNER,
     captions: Annotated[
         bool, typer.Option("--captions/--no-captions", help="Burn word-highlighted captions in.")
     ] = _D.caption.enabled,
@@ -495,6 +508,8 @@ def run(
             "crop_x": crop_x,
             "reframe": reframe.value,
             "background": background.value,
+            "webcam": "auto" if webcam else "off",
+            "webcam_corner": webcam_corner.value,
         },
         caption={"enabled": captions},
         diarize={"enabled": speakers, "num_speakers": num_speakers},
