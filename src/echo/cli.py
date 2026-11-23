@@ -95,9 +95,23 @@ def _main(
     ] = None,
 ) -> None:
     """Turn a long video into short vertical clips."""
+    _tolerant_output()
     # API keys (GROQ_API_KEY, MISTRAL_API_KEY, ...) can live in a git-ignored .env, found
     # from the current directory upwards. Variables already set in the shell win.
     load_dotenv(find_dotenv(usecwd=True), override=False)
+
+
+def _tolerant_output(streams: Sequence[Any] | None = None) -> None:
+    """Never crash on printing: a redirected stdout on Windows is cp1252, which can't
+    encode the LLM's typography (non-breaking hyphens, emoji) or non-Latin titles.
+    Unencodable characters become ``?``."""
+    for stream in streams if streams is not None else (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(errors="replace")
+            except (ValueError, OSError):  # already written to, or not a text stream
+                pass
 
 
 QUIET_ENV = {
@@ -550,3 +564,83 @@ def _print_clips(clips: list[ClipSpec], paths: list[Path], scores: dict[str, Sco
         typer.echo(f"  {score.overall:4.1f}  {path}" if score else f"     -  {path}")
         if score and score.reason:
             typer.echo(f"        {score.reason}")
+
+
+def _open_job(job: str, jobs_dir: Path) -> Job:
+    """A job by directory path, or by id under ``jobs_dir``."""
+    path = Path(job)
+    if (path / "job.json").is_file():
+        return Job(path)
+    return Job.open(jobs_dir, job)
+
+
+@app.command()
+def posts(
+    job: Annotated[
+        str,
+        typer.Argument(help="The job: its directory, or its id in --jobs-dir.", show_default=False),
+    ],
+    jobs_dir: Annotated[
+        Path, typer.Option(help="Directory holding the job directories.")
+    ] = _D.jobs_dir,
+    llm_provider: Annotated[
+        str, typer.Option(help="LLM provider (see docs/llm-providers.md).")
+    ] = _D.llm.provider,
+    llm_model: Annotated[str, typer.Option(help="LLM model name.")] = _D.llm.model,
+    regenerate: Annotated[
+        bool,
+        typer.Option(
+            "--regenerate",
+            help="Rewrite the text of clips still pending review (approved and rejected "
+            "clips are never touched).",
+        ),
+    ] = False,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Debug logging and full tracebacks.")
+    ] = False,
+) -> None:
+    """Write a title, description and hashtags for each clip of JOB (clips/publish.json).
+
+    Clips that already have text keep it, so edits made in review are never lost.
+    Nothing is posted.
+    """
+    from echo.llm.client import make_llm_client
+    from echo.publish.text import LLMPostWriter, update_posts
+
+    if verbose:
+        logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s: %(message)s")
+    config = _build_config(
+        jobs_dir=jobs_dir,
+        transcribe={},
+        llm={"provider": llm_provider, "model": llm_model},
+        refine={},
+        clip={},
+        caption={},
+    )
+    writer: LLMPostWriter | None = None
+    try:
+        the_job = _open_job(job, config.jobs_dir)
+        writer = LLMPostWriter(make_llm_client(config.llm), config.llm)
+        update = update_posts(the_job, writer, config.chunk, regenerate=regenerate)
+    except EchoError as e:
+        if verbose:
+            typer.echo(traceback.format_exc(), err=True, nl=False)
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    except KeyboardInterrupt:
+        typer.echo("interrupted", err=True)
+        raise typer.Exit(130) from None
+    finally:
+        if writer is not None:
+            writer.close()
+
+    written = set(update.written)
+    typer.echo(f"posts: {the_job.publish_path}")
+    for post in update.posts:
+        mark = "new" if post.clip in written else post.approval.value
+        typer.echo(f"  [{mark}] {post.clip}")
+        typer.echo(f"        {post.title}")
+        if post.hashtags:
+            typer.echo("        " + " ".join(f"#{t}" for t in post.hashtags))
+    if update.dropped:
+        typer.echo(f"dropped (clip gone): {', '.join(update.dropped)}")
