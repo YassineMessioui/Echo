@@ -1,0 +1,4 @@
+# Test fixtures are compared byte for byte: keep them LF on every OS (Windows
+# checkouts would otherwise convert them to CRLF).
+tests/fixtures/** text eol=lf
+*.json text eol=lf

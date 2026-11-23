@@ -8,8 +8,8 @@ from echo.reframe import TARGET, video_filter, video_filter_for
 BLUR_1080 = (
     "split=2[bg][fg];"
     "[bg]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,boxblur=10:2,"
-    "scale=1080:1920,setsar=1[back];"
-    "[fg]scale=1080:1080,setsar=1[front];"
+    "scale=1080:1920:flags=lanczos,setsar=1[back];"
+    "[fg]scale=1080:1080:flags=lanczos,setsar=1[front];"
     "[back][front]overlay=0:420,setsar=1"
 )
 
@@ -18,39 +18,51 @@ BLUR_1080 = (
     ("size", "config", "expected"),
     [
         # Wider than 4:3: full-height 9:16 crop placed by crop_x, then scale.
-        ((1920, 1080), ClipConfig(), "crop=606:1080:657:0,scale=1080:1920,setsar=1"),
-        ((1920, 1080), ClipConfig(crop_x=0), "crop=606:1080:0:0,scale=1080:1920,setsar=1"),
-        ((1920, 1080), ClipConfig(crop_x=1), "crop=606:1080:1314:0,scale=1080:1920,setsar=1"),
-        ((1280, 720), ClipConfig(), "crop=404:720:438:0,scale=1080:1920,setsar=1"),
+        ((1920, 1080), ClipConfig(), "crop=606:1080:657:0,scale=1080:1920:flags=lanczos,setsar=1"),
+        (
+            (1920, 1080),
+            ClipConfig(crop_x=0),
+            "crop=606:1080:0:0,scale=1080:1920:flags=lanczos,setsar=1",
+        ),
+        (
+            (1920, 1080),
+            ClipConfig(crop_x=1),
+            "crop=606:1080:1314:0,scale=1080:1920:flags=lanczos,setsar=1",
+        ),
+        ((1280, 720), ClipConfig(), "crop=404:720:438:0,scale=1080:1920:flags=lanczos,setsar=1"),
         (
             (1280, 720),
             ClipConfig(background="black"),
-            "crop=404:720:438:0,scale=1080:1920,setsar=1",
+            "crop=404:720:438:0,scale=1080:1920:flags=lanczos,setsar=1",
         ),
-        ((1440, 1080), ClipConfig(), "crop=606:1080:417:0,scale=1080:1920,setsar=1"),
+        ((1440, 1080), ClipConfig(), "crop=606:1080:417:0,scale=1080:1920:flags=lanczos,setsar=1"),
         # Already 9:16 (or within tolerance): scale only, never cropped.
-        ((1080, 1920), ClipConfig(), "scale=1080:1920,setsar=1"),
-        ((720, 1280), ClipConfig(), "scale=1080:1920,setsar=1"),
-        ((720, 1280), ClipConfig(crop_x=0, background="black"), "scale=1080:1920,setsar=1"),
-        ((1080, 1918), ClipConfig(), "scale=1080:1920,setsar=1"),
+        ((1080, 1920), ClipConfig(), "scale=1080:1920:flags=lanczos,setsar=1"),
+        ((720, 1280), ClipConfig(), "scale=1080:1920:flags=lanczos,setsar=1"),
+        (
+            (720, 1280),
+            ClipConfig(crop_x=0, background="black"),
+            "scale=1080:1920:flags=lanczos,setsar=1",
+        ),
+        ((1080, 1918), ClipConfig(), "scale=1080:1920:flags=lanczos,setsar=1"),
         # 1:1 and narrower than 9:16: fit inside and pad, never stretched.
         ((1080, 1080), ClipConfig(), BLUR_1080),
         ((1080, 1080), ClipConfig(crop_x=0), BLUR_1080),
         (
             (1080, 1080),
             ClipConfig(background="black"),
-            "scale=1080:1080,pad=1080:1920:0:420:black,setsar=1",
+            "scale=1080:1080:flags=lanczos,pad=1080:1920:0:420:black,setsar=1",
         ),
         (
             (720, 1600),
             ClipConfig(background="black"),
-            "scale=864:1920,pad=1080:1920:108:0:black,setsar=1",
+            "scale=864:1920:flags=lanczos,pad=1080:1920:108:0:black,setsar=1",
         ),
         # Odd fitted sizes are rounded down to even.
         (
             (1001, 999),
             ClipConfig(background="black"),
-            "scale=1080:1076,pad=1080:1920:0:422:black,setsar=1",
+            "scale=1080:1076:flags=lanczos,pad=1080:1920:0:422:black,setsar=1",
         ),
     ],
 )
@@ -138,7 +150,7 @@ def test_rotated_phone_video_is_not_cropped(make_video, tmp_path):
     assert info.rotation in (90, 270)
     assert info.frame_size == (180, 320)
     vf = video_filter_for(src, ClipConfig())
-    assert vf == "scale=1080:1920,setsar=1"
+    assert vf == "scale=1080:1920:flags=lanczos,setsar=1"
     out = tmp_path / "out.mp4"
     ffmpeg(["-i", str(src), "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", str(out)])
     assert (probe(out).width, probe(out).height) == TARGET

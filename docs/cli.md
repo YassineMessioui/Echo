@@ -10,7 +10,7 @@ echo-clips run VIDEO [OPTIONS]
 `VIDEO` is a local file or an `http(s)://` link (YouTube, Vimeo, …). For a link,
 [yt-dlp](https://github.com/yt-dlp/yt-dlp) downloads **only the audio** into the job
 folder, which is all transcription needs; the clip stage then reads just each clip's
-section of the video (up to 1080p) straight from the site. On a 68-min podcast that's
+section of the video (up to 4K, SDR) straight from the site. On a 68-min podcast that's
 ~67 MB before transcription can start instead of ~240 MB. Sites whose streams can't be
 read that way fall back to downloading the full video. Without `--job-id`, the job is named after
 the site and video id (e.g. `youtube-jNQXAC9IVRw`), so running the same link again
@@ -39,7 +39,7 @@ resumes that job instead of downloading it again. YouTube needs a JavaScript run
 | `--background [blur\|black]` | `blur` | `ClipConfig.background` |
 | `--captions / --no-captions` | on | `CaptionConfig.enabled` (burned-in, word-highlighted) |
 | `--speakers / --no-speakers` | off | `DiarizeConfig.enabled`: detect who speaks when (`speakers.json`); captions get a colour per speaker. Adds ~5 min of CPU per hour of audio; the models (~46 MB) download once to `~/.cache/echo/models` (`ECHO_MODELS_DIR`) |
-| `--num-speakers N` | estimate | `DiarizeConfig.num_speakers` |
+| `--num-speakers N` | estimate | `DiarizeConfig.num_speakers`: exactly N speakers. When estimating, speakers with similar voices are merged (`merge_threshold`) and speakers with under 2 % of the speech (laughter, "mm-hm") are folded into the nearest speaker in time (`min_speaker_share`) |
 | `-v, --verbose` | off | debug logging |
 
 Option defaults come from `PipelineConfig`, so the two can't drift. Hosted LLM providers
@@ -92,6 +92,56 @@ clips (5, best first):
 On failure it prints the stage and
 error message (no traceback unless `--verbose`).
 
+## `echo-clips posts JOB` (#101)
+
+Writes a title (at most 70 characters), a 1–3 line description and 3–5 hashtags for every clip of a finished job, into `clips/publish.json` (see the README), all `pending` review. **Nothing is posted.** `JOB` is a job directory or a job id in `--jobs-dir`.
+
+One LLM call covers as many clips as fit the model's window budget (usually the whole job on a hosted model). The LLM gets each clip's own transcript text and its topic, and invalid answers (too long, wrong hashtag count, missing clips) are sent back to it, like topic extraction.
+
+Running it again only writes text for clips that don't have any yet, so edits made in review are kept. `--regenerate` rewrites the text of clips still `pending`; approved and rejected clips are never touched. A post whose clip is gone after a re-run is dropped, unless it was already published.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--jobs-dir PATH` | `jobs` | where to look for a job id |
+| `--llm-provider`, `--llm-model` | as `run` | the LLM that writes the text |
+| `--regenerate` | off | rewrite the text of clips still pending review |
+| `--verbose`, `-v` | off | debug logging and full tracebacks |
+
+```
+posts: jobs/ep42/clips/publish.json
+  [new] 01-solar-power-is-now-the-cheapest-electricity.mp4
+        Solar power now the cheapest new electricity in Europe
+        #solar #renewableenergy #Europe #cleanenergy #electricity
+  [approved] 02-sleep-and-productivity.mp4
+        How losing just one hour of sleep hurts focus
+        #sleep #productivity #focus #health #wellbeing
+```
+
+## `echo-clips review JOB` (#102)
+
+Lists the clips of a job with their post text (from `echo-clips posts`), duration and path, and records a human's decision. **Only approved clips are ever published**, and a clip can only be approved while its video exists. Without options it just lists. Clips are numbered as listed (1, 2, ...).
+
+| Option | Meaning |
+|---|---|
+| `--approve 1,3-5` | approve these clips |
+| `--reject 2` | reject these clips |
+| `--reset 4` | put these clips back to pending |
+| `--clip N --title T --description D --hashtags a,b` | edit clip N's text (`\n` in D for a new line; hashtags without `#`) |
+| `-i`, `--interactive` | go through the pending clips one by one: approve, reject, edit, skip or quit. Each decision is saved at once |
+
+A bad request (unknown clip, two decisions for one clip, a title over 100 characters) exits with 1 and changes nothing.
+
+```
+  1 [approved] 01-how-caffeine-keeps-you-awake.mp4  33.9s
+      How caffeine blocks sleep signals
+      Caffeine blocks adenosine, the molecule that makes you sleepy.
+      #caffeine #sleep #biology #coffee
+      jobs/podcast/clips/01-how-caffeine-keeps-you-awake.mp4
+  2 [pending] 02-why-moving-bikes-stay-upright.mp4  37.5s
+      ...
+2 approved, 1 pending, 0 rejected
+```
+
 ## Exit codes
 
 | Code | Meaning |
@@ -111,4 +161,6 @@ echo-clips run episode.mp4 --llm-provider groq --llm-model openai/gpt-oss-120b
 echo-clips run episode.mp4 --aspect source
 echo-clips run episode.mp4 --range 15%:85%
 echo-clips run episode.mp4 --llm-provider gemini --max-clips 5   # the 5 best
+echo-clips posts ep42 --llm-provider groq   # text for each clip, nothing is posted
+echo-clips review ep42 -i                   # approve, reject or edit each clip
 ```

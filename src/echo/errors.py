@@ -31,3 +31,8 @@ class LLMError(EchoError):
 
 class TopicExtractionError(EchoError):
     """The LLM output stayed invalid after all retries."""
+
+
+class PublishError(EchoError):
+    """Posting a clip failed: not approved, not signed in, quota, or the platform
+    rejected the upload."""

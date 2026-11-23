@@ -5,6 +5,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from echo.models import Platform
+
 
 class _Section(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -183,8 +185,28 @@ class DiarizeConfig(_Section):
     enabled: bool = False
     num_speakers: int | None = Field(default=None, ge=1)
     """None = estimate the number of speakers."""
-    threshold: float = Field(default=0.5, gt=0, lt=2)
-    """Clustering distance when estimating: lower splits into more speakers."""
+    threshold: float = Field(default=0.8, gt=0, lt=2)
+    """Clustering distance when estimating: lower splits into more speakers. (0.5 split a
+    68-min two-person podcast into 171 speakers, #119.)"""
+    merge_threshold: float = Field(default=0.3, ge=0, lt=2)
+    """When estimating, a second pass merges speakers whose mean voices (TitaNet
+    embeddings) are closer than this cosine distance; 0 = off."""
+    min_speaker_share: float = Field(default=0.02, ge=0, lt=1)
+    """When estimating, speakers with under this share of all speech (laughter,
+    crosstalk, "mm-hm") are folded into the nearest main speaker in time; 0 = off."""
+
+
+class PublishConfig(_Section):
+    """Posting approved clips (#67). Read only by the ``echo-clips publish`` command: a
+    pipeline run never posts anything."""
+
+    platforms: list[Platform] = Field(default_factory=list)
+    """Where ``publish`` posts by default (none until set: posting is always opt-in)."""
+    privacy: Literal["private", "unlisted", "public"] = "private"
+    """Visibility of new posts, where the platform has one (TikTok and Reels map
+    ``unlisted`` to their closest setting)."""
+    require_approval: Literal[True] = True
+    """Only clips approved in review (#102) are published. Fixed: it can't be turned off."""
 
 
 class PipelineConfig(_Section):
@@ -198,3 +220,4 @@ class PipelineConfig(_Section):
     clip: ClipConfig = ClipConfig()
     caption: CaptionConfig = CaptionConfig()
     diarize: DiarizeConfig = DiarizeConfig()
+    publish: PublishConfig = PublishConfig()
