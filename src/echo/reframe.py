@@ -103,7 +103,8 @@ def video_filter(
         width, height = _even(width * sar), _even(height)
         prefix = f"scale={width}:{height},setsar=1,"
     out_w, out_h = TARGET
-    scale = f"scale={out_w}:{out_h}"
+    # lanczos: sharper than the default bicubic when a 9:16 crop is enlarged (#16).
+    scale = f"scale={out_w}:{out_h}:flags=lanczos"
     aspect = width / height
 
     if abs(aspect - VERTICAL) <= ASPECT_TOLERANCE * VERTICAL:
