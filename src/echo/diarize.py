@@ -5,6 +5,13 @@ TitaNet-small embeds each turn's voice, and clustering groups turns by speaker. 
 runs offline on CPU (~5 min per hour of audio), with no Hugging Face token and no
 PyTorch. The two models (~46 MB) download on first use into ``models_dir()``.
 
+When the number of speakers is estimated (no ``num_speakers``), one clustering pass
+over-splits long audio (#119: 171 "speakers" on a 68-min two-person podcast), so two
+clean-up steps follow: ``merge_similar_speakers`` merges speakers whose mean voices are
+close, and ``fold_minor_speakers`` gives speakers with a tiny share of the speech
+(laughter, crosstalk, "mm-hm") to the nearest main speaker in time. An exact
+``num_speakers`` skips both.
+
 Turns are written in original-video time (shifted by ``Transcript.offset``, so a focus
 range works) and relabelled ``S1``, ``S2``, ... in order of first appearance.
 
@@ -52,6 +59,10 @@ one voice into extra speakers)."""
 
 MODEL_NAME = "sherpa-onnx/pyannote-3.0+titanet-small"
 SAMPLE_RATE = 16_000
+VOICE_SAMPLE = 60.0
+"""Seconds of each speaker's longest turns embedded for the second clustering pass."""
+MIN_EMBED_SAMPLES = SAMPLE_RATE // 4
+"""Shorter turns are zero-padded to this length before embedding."""
 
 
 def models_dir() -> Path:
@@ -121,6 +132,7 @@ class SherpaDiarizer:
         self.config = config
         self._models = models
         self._engine: sherpa_onnx.OfflineSpeakerDiarization | None = None
+        self._extractor: sherpa_onnx.SpeakerEmbeddingExtractor | None = None
 
     def _get(self) -> sherpa_onnx.OfflineSpeakerDiarization:
         if self._engine is None:
@@ -148,7 +160,36 @@ class SherpaDiarizer:
             if not engine_config.validate():
                 raise TranscriptionError("invalid speaker diarization model configuration")
             self._engine = sherpa_onnx.OfflineSpeakerDiarization(engine_config)
+            self._extractor = sherpa_onnx.SpeakerEmbeddingExtractor(engine_config.embedding)
         return self._engine
+
+    def _voices(self, samples: np.ndarray, turns: list[SpeakerTurn]) -> dict[str, np.ndarray]:
+        """Each speaker's mean voice for ``merge_similar_speakers``: the duration-weighted
+        sum of the unit embeddings of its longest turns, up to ``VOICE_SAMPLE`` seconds
+        (so the cost stays small on long audio)."""
+        assert self._extractor is not None
+        by_speaker: dict[str, list[SpeakerTurn]] = {}
+        for turn in turns:
+            by_speaker.setdefault(turn.speaker, []).append(turn)
+        voices: dict[str, np.ndarray] = {}
+        for speaker, own in by_speaker.items():
+            total = 0.0
+            for turn in sorted(own, key=lambda t: t.start - t.end):  # longest first
+                if total >= VOICE_SAMPLE:
+                    break
+                chunk = samples[int(turn.start * SAMPLE_RATE) : int(turn.end * SAMPLE_RATE)]
+                if len(chunk) < MIN_EMBED_SAMPLES:
+                    chunk = np.pad(chunk, (0, MIN_EMBED_SAMPLES - len(chunk)))
+                stream = self._extractor.create_stream()
+                stream.accept_waveform(SAMPLE_RATE, chunk)
+                stream.input_finished()
+                vector = np.asarray(self._extractor.compute(stream), dtype=np.float64)
+                norm = np.linalg.norm(vector)
+                if norm:
+                    duration = turn.end - turn.start
+                    voices[speaker] = voices.get(speaker, 0.0) + vector / norm * duration
+                    total += duration
+        return voices
 
     def diarize(self, audio: Path) -> list[SpeakerTurn]:
         samples = _load_wav(audio)
@@ -162,11 +203,94 @@ class SherpaDiarizer:
             result = engine.process(samples, callback=on_chunk).sort_by_start_time()
         except RuntimeError as e:
             raise TranscriptionError(f"speaker diarization failed: {e}") from e
-        return [
+        turns = [
             SpeakerTurn(start=r.start, end=r.end, speaker=str(r.speaker))
             for r in result
             if r.end > r.start
         ]
+        if self.config.num_speakers:  # an exact count: keep what the engine found
+            return turns
+        if self.config.merge_threshold > 0:
+            voices = self._voices(samples, turns)
+            turns = merge_similar_speakers(turns, voices, self.config.merge_threshold)
+        return fold_minor_speakers(turns, self.config.min_speaker_share)
+
+
+def speech_per_speaker(turns: list[SpeakerTurn]) -> dict[str, float]:
+    """Seconds of speech per speaker, in order of first appearance."""
+    speech: dict[str, float] = {}
+    for turn in sorted(turns, key=lambda t: t.start):
+        speech[turn.speaker] = speech.get(turn.speaker, 0.0) + turn.end - turn.start
+    return speech
+
+
+def merge_similar_speakers(
+    turns: list[SpeakerTurn], voices: dict[str, np.ndarray], max_distance: float
+) -> list[SpeakerTurn]:
+    """Second clustering pass: merge speakers whose mean voices are close.
+
+    ``voices`` maps each speaker to the duration-weighted sum of its turns' (unit)
+    embeddings. The closest pair (cosine distance) is merged while it is under
+    ``max_distance``; a merged voice is the sum of both. Ties go to the pair that appears
+    first, and a merged speaker keeps the label of the one that spoke first. Speakers
+    without a voice are left alone; ``max_distance <= 0`` changes nothing."""
+    order = [s for s in speech_per_speaker(turns) if s in voices]
+    if max_distance <= 0 or len(order) < 2:
+        return turns
+    sums = {s: np.asarray(voices[s], dtype=np.float64) for s in order}
+    into = {s: s for s in order}
+    while len(order) > 1:
+        unit = np.stack([sums[s] / (np.linalg.norm(sums[s]) or 1.0) for s in order])
+        similarity = unit @ unit.T
+        np.fill_diagonal(similarity, -np.inf)
+        i, j = divmod(int(np.argmax(similarity)), len(order))  # first pair wins a tie
+        if 1.0 - similarity[i, j] >= max_distance:
+            break
+        keep, drop = order[min(i, j)], order[max(i, j)]
+        sums[keep] = sums[keep] + sums.pop(drop)
+        order.remove(drop)
+        for s, target in into.items():
+            if target == drop:
+                into[s] = keep
+    return [t.model_copy(update={"speaker": into.get(t.speaker, t.speaker)}) for t in turns]
+
+
+def fold_minor_speakers(turns: list[SpeakerTurn], min_share: float) -> list[SpeakerTurn]:
+    """Give the turns of speakers holding under ``min_share`` of all speech (laughter,
+    crosstalk, "mm-hm" split off as their own speaker) to the nearest real speaker in
+    time: the main speaker whose turn is closest (overlap = 0 s; a tie goes to the
+    earlier turn). The speaker with the most speech always stays. Same-speaker turns that
+    then overlap or touch are joined. ``min_share <= 0`` changes nothing."""
+    speech = speech_per_speaker(turns)
+    total = sum(speech.values())
+    if min_share <= 0 or not total:
+        return turns
+    top = max(speech, key=lambda s: speech[s])  # first appearance wins a tie
+    main = {s for s, secs in speech.items() if secs / total >= min_share} | {top}
+    if len(main) == len(speech):
+        return turns
+    ordered = sorted(turns, key=lambda t: t.start)
+    anchors = [t for t in ordered if t.speaker in main]
+
+    def nearest(turn: SpeakerTurn) -> str:
+        def gap(other: SpeakerTurn) -> float:
+            return max(0.0, other.start - turn.end, turn.start - other.end)
+
+        return min(anchors, key=lambda a: (gap(a), a.start)).speaker
+
+    folded = [
+        t if t.speaker in main else t.model_copy(update={"speaker": nearest(t)}) for t in ordered
+    ]
+    out: list[SpeakerTurn] = []
+    last: dict[str, int] = {}  # speaker -> index of its latest turn in ``out``
+    for turn in folded:
+        i = last.get(turn.speaker)
+        if i is not None and turn.start <= out[i].end:
+            out[i] = out[i].model_copy(update={"end": max(out[i].end, turn.end)})
+            continue
+        last[turn.speaker] = len(out)
+        out.append(turn)
+    return out
 
 
 def relabel(turns: list[SpeakerTurn], offset: float = 0.0) -> Speakers:
@@ -192,9 +316,15 @@ class DiarizeStage:
         return [job.speakers_path]
 
     def settings(self, config: PipelineConfig) -> str:
-        """Re-diarize when the engine or the clustering settings change."""
+        """Re-diarize when the engine or the clustering settings change. An exact
+        ``num_speakers`` ignores the estimation settings, so they're left out then."""
         d = config.diarize
-        return f"{self.diarizer.model_name}|speakers={d.num_speakers or 'auto'}|t={d.threshold}"
+        if d.num_speakers:
+            return f"{self.diarizer.model_name}|speakers={d.num_speakers}"
+        return (
+            f"{self.diarizer.model_name}|speakers=auto|t={d.threshold}"
+            f"|merge={d.merge_threshold}|min_share={d.min_speaker_share}"
+        )
 
     def run(self, job: Job, config: PipelineConfig) -> None:
         if not job.audio_path.is_file():

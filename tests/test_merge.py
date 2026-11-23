@@ -356,7 +356,7 @@ class _BlockingClient:
         self.closed = threading.Event()
         self.calls = 0
 
-    def complete(self, system: str, prompt: str, *, json_schema=None) -> str:
+    def complete(self, system: str, prompt: str, *, json_schema=None, images=()) -> str:
         self.calls += 1
         if self.closed.wait(self.seconds):
             raise LLMError("client closed")  # must not replace the KeyboardInterrupt

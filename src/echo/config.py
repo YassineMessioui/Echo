@@ -181,8 +181,15 @@ class DiarizeConfig(_Section):
     enabled: bool = False
     num_speakers: int | None = Field(default=None, ge=1)
     """None = estimate the number of speakers."""
-    threshold: float = Field(default=0.5, gt=0, lt=2)
-    """Clustering distance when estimating: lower splits into more speakers."""
+    threshold: float = Field(default=0.8, gt=0, lt=2)
+    """Clustering distance when estimating: lower splits into more speakers. (0.5 split a
+    68-min two-person podcast into 171 speakers, #119.)"""
+    merge_threshold: float = Field(default=0.3, ge=0, lt=2)
+    """When estimating, a second pass merges speakers whose mean voices (TitaNet
+    embeddings) are closer than this cosine distance; 0 = off."""
+    min_speaker_share: float = Field(default=0.02, ge=0, lt=1)
+    """When estimating, speakers with under this share of all speech (laughter,
+    crosstalk, "mm-hm") are folded into the nearest main speaker in time; 0 = off."""
 
 
 class PublishConfig(_Section):
