@@ -63,7 +63,7 @@ jobs:
           path: ~/.cache/echo/models
           key: echo-diarize-${{ runner.os }}-v1
       - run: uv sync --locked
-      - run: uv run pytest -m model tests/test_e2e.py tests/test_diarize.py
+      - run: uv run pytest -m model tests/test_e2e.py tests/test_diarize.py tests/test_framing.py
 
   build:
     runs-on: ubuntu-latest
